@@ -101,7 +101,7 @@ endfunction()
 # rex_resolve_version(<out_var>
 #     FLOOR_MAJOR <int>
 #     FLOOR_MINOR <int>
-#     [SOURCE_DIR <path>])    # defaults to CMAKE_SOURCE_DIR
+#     [SOURCE_DIR <path>])    # defaults to CMAKE_CURRENT_SOURCE_DIR
 #
 # Runs git in the working tree, then delegates to rex_compute_version.
 #==========================================================
@@ -110,7 +110,7 @@ function(rex_resolve_version out_var)
     cmake_parse_arguments(ARG "" "${one_value}" "" ${ARGN})
 
     if(NOT ARG_SOURCE_DIR)
-        set(ARG_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
+        set(ARG_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
 
     find_program(GIT_EXECUTABLE git)

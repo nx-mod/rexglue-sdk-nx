@@ -133,7 +133,7 @@ install(FILES
 )
 
 install(FILES
-    ${CMAKE_SOURCE_DIR}/cmake/rexglue_helpers.cmake
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_helpers.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rexglue
 )
 
