@@ -10,87 +10,87 @@
  */
 
 #include <algorithm>
+#include <condition_variable>
 #include <forward_list>
-
-#include <disruptorplus/multi_threaded_claim_strategy.hpp>
-#include <disruptorplus/ring_buffer.hpp>
-#include <disruptorplus/sequence_barrier.hpp>
-#include <disruptorplus/spin_wait_strategy.hpp>
+#include <mutex>
+#include <stop_token>
 
 #include <rex/assert.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
 
-namespace dp = disruptorplus;
-
 namespace rex::thread {
 
 using WaitItem = TimerQueueWaitItem;
 
+// Timers are handed to a single dispatch thread, which blocks on a condition
+// variable until a new timer arrives or the earliest pending one is due. It
+// does not wake up while there is nothing to do.
+//
+// This used to be a disruptorplus ring buffer with a spin-wait strategy, which
+// kept yielding and sleeping for 1 ms in a loop even with no timer queued: in
+// the order of a thousand wake-ups per second competing with the guest, which
+// matters on machines with few cores.
 class TimerQueue {
  public:
   using clock = WaitItem::clock;
   static_assert(clock::is_steady);
 
  public:
-  TimerQueue()
-      : buffer_(kWaitCount),
-        wait_strategy_(),
-        claim_strategy_(kWaitCount, wait_strategy_),
-        consumed_(wait_strategy_) {
-    claim_strategy_.add_claim_barrier(consumed_);
+  TimerQueue() {
     dispatch_thread_ =
         std::jthread([this](std::stop_token stop_token) { TimerThreadMain(stop_token); });
   }
 
   ~TimerQueue() {
+    // Wakes the dispatch thread out of its wait; std::jthread joins on
+    // destruction, before the members it uses are destroyed.
     dispatch_thread_.request_stop();
-
-    // Kick dispatch thread to check stop token
-    auto wait_item = std::make_shared<WaitItem>(nullptr, nullptr, this, clock::time_point::min(),
-                                                clock::duration::zero());
-    wait_item->Disarm();
-    QueueTimer(std::move(wait_item));
-
-    // std::jthread auto-joins on destruction
   }
 
   void TimerThreadMain(std::stop_token stop_token) {
-    dp::sequence_t next_sequence = 0;
     const auto comp = [](const std::shared_ptr<WaitItem>& left,
                          const std::shared_ptr<WaitItem>& right) {
       return left->due_ < right->due_;
     };
+    const auto has_pending = [this] { return !pending_.empty(); };
 
     set_current_thread_name("rex::thread::TimerQueue");
 
+    // This is a _sorted_ (ascending due_) list of active timers. Only this
+    // thread touches it, so it needs no lock.
+    std::forward_list<std::shared_ptr<WaitItem>> wait_queue;
+
     while (!stop_token.stop_requested()) {
       {
-        // Consume new wait items and add them to sorted wait queue
-        dp::sequence_t available = claim_strategy_.wait_until_published(
-            next_sequence, next_sequence - 1,
-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
-
-        // Check for timeout
-        if (available != next_sequence - 1) {
-          std::forward_list<std::shared_ptr<WaitItem>> wait_items;
-          do {
-            wait_items.push_front(std::move(buffer_[next_sequence]));
-          } while (next_sequence++ != available);
-
-          consumed_.publish(available);
-
-          wait_items.sort(comp);
-          wait_queue_.merge(wait_items, comp);
+        // Wait for new wait items or for the earliest one to be due, then take
+        // the new ones and add them to the sorted wait queue
+        std::forward_list<std::shared_ptr<WaitItem>> wait_items;
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          if (pending_.empty()) {
+            if (wait_queue.empty()) {
+              cv_.wait(lock, stop_token, has_pending);
+            } else {
+              // Bounded so a far-future due time never reaches the clock
+              // conversions inside the wait.
+              const auto limit = clock::now() + std::chrono::hours(1);
+              cv_.wait_until(lock, stop_token, std::min(wait_queue.front()->due_, limit),
+                             has_pending);
+            }
+          }
+          wait_items.swap(pending_);
         }
+        wait_items.sort(comp);
+        wait_queue.merge(wait_items, comp);
       }
 
       {
         // Check wait queue, invoke callbacks and reschedule
         std::forward_list<std::shared_ptr<WaitItem>> wait_items;
-        while (!wait_queue_.empty() && wait_queue_.front()->due_ <= clock::now()) {
-          auto wait_item = std::move(wait_queue_.front());
-          wait_queue_.pop_front();
+        while (!wait_queue.empty() && wait_queue.front()->due_ <= clock::now()) {
+          auto wait_item = std::move(wait_queue.front());
+          wait_queue.pop_front();
 
           // Ensure that it isn't disarmed
           auto state = WaitItem::State::kIdle;
@@ -118,7 +118,7 @@ class TimerQueue {
           }
         }
         wait_items.sort(comp);
-        wait_queue_.merge(wait_items, comp);
+        wait_queue.merge(wait_items, comp);
       }
     }
   }
@@ -129,9 +129,11 @@ class TimerQueue {
     // Mitigate callback flooding
     wait_item->due_ = std::max(clock::now() - wait_item->interval_, wait_item->due_);
 
-    auto sequence = claim_strategy_.claim_one();
-    buffer_[sequence] = std::move(wait_item);
-    claim_strategy_.publish(sequence);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      pending_.push_front(std::move(wait_item));
+    }
+    cv_.notify_one();
 
     return wait_item_weak;
   }
@@ -139,16 +141,13 @@ class TimerQueue {
   std::jthread::id dispatch_thread_id() const { return dispatch_thread_.get_id(); }
 
  private:
-  // This ring buffer will be used to introduce timers queued by the public API
-  static constexpr size_t kWaitCount = 512;
-  dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
-  dp::spin_wait_strategy wait_strategy_;
-  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
-  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
+  // Wait items queued by the public API and not yet taken by the dispatch
+  // thread. Guarded by mutex_.
+  std::mutex mutex_;
+  std::condition_variable_any cv_;
+  std::forward_list<std::shared_ptr<WaitItem>> pending_;
 
-  // This is a _sorted_ (ascending due_) list of active timers managed by a
-  // dedicated thread
-  std::forward_list<std::shared_ptr<WaitItem>> wait_queue_;
+  // Declared last: it is stopped and joined before the members above go away.
   std::jthread dispatch_thread_;
 };
 

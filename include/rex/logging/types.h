@@ -79,8 +79,24 @@ struct LogConfig {
   /** spdlog pattern string for the file sink. */
   std::string file_pattern = "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] [t%t] %v";
 
-  /** Messages at or above this level trigger an immediate flush. */
-  spdlog::level::level_enum flush_level = spdlog::level::info;
+  /*
+   * Messages at or above this level trigger an immediate flush.
+   *
+   * It used to be "info", that is, every log line.
+   *
+   * On the Switch the log lives on the SD, and a flush there is not a buffer write: it is an fwrite plus
+   * an fflush that goes down to the Horizon file system, with its round trip. And it ran on the thread
+   * that wrote the line. The "[nativo]" summary blocks are fifteen or twenty lines in a row from the
+   * render thread: fifteen or twenty trips to the card within one frame. One log had seconds with 85
+   * lines, and 38 of its 200 stutters fall less than 0.6 s from one of those blocks, of which there are
+   * only 24 in the whole run (chance would give 23 of 200; there are 38).
+   *
+   * Now only warnings and errors force a flush; they are rare and they are exactly the ones worth
+   * keeping if the game hangs. Normal lines accumulate in the stdio buffer and the periodic flush
+   * (log_flush_interval, 1 s by default) writes them from its own thread, not from the game's. The
+   * worst that can be lost in a hard hang is one second of informational lines.
+   */
+  spdlog::level::level_enum flush_level = spdlog::level::warn;
 
   /**
    * Per-category log level overrides.

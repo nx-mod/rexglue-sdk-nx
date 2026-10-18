@@ -11,9 +11,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <queue>
 #include <stack>
+#include <thread>
+#include <vector>
 
 #include <rex/audio/audio_driver.h>
 #include <rex/thread.h>
@@ -49,6 +52,15 @@ class SDLAudioDriver : public AudioDriver {
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
+  // Diagnostic audio_sdl_rafaga_tramas: already converted samples from the last burst still to be
+  // delivered to SDL. Only SDL's audio thread uses them.
+  std::vector<float> rafaga_ = {};
+  size_t rafaga_leido_ = 0;
+  // Diagnostic audio_sdl_bomba: a thread that requests a frame every 5.333 ms while the queue holds at
+  // most 6, like the Switch driver's pump; with it, SDL does not release the semaphore when consuming.
+  void Bomba();
+  std::thread bomba_ = {};
+  std::atomic<bool> bomba_activa_{false};
 };
 
 }  // namespace rex::audio::sdl

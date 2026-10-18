@@ -280,6 +280,7 @@ inline void emitAtomicLoadReserve(BuilderContext& ctx, const char* ptr_type, con
   if (ctx.insn.operands[1] != 0)
     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
+  ctx.println("\t{} = {};", ctx.reserved_address(), ctx.ea());
   ctx.println("\t{}.{} = *({}*)REX_RAW_ADDR({});", ctx.reserved(), reserved_field, ptr_type,
               ctx.ea());
   ctx.println("\t{}.u64 = {}({}.{});", ctx.r(ctx.insn.operands[0]), bswap_func, ctx.reserved(),
@@ -304,12 +305,15 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
   ctx.println("\t{}.lt = 0;", ctx.cr(0));
   ctx.println("\t{}.gt = 0;", ctx.cr(0));
+  // Fails without storing unless the reservation is on this address; either way the reservation is gone
+  // afterwards (from furqanagwan/rexglue-sdk 78a67609, on top of upstream's std::atomic CAS).
   ctx.println(
-      "\t{}.eq = reinterpret_cast<std::atomic<{}>*>(REX_RAW_ADDR({}))"
+      "\t{}.eq = {} == {} && reinterpret_cast<std::atomic<{}>*>(REX_RAW_ADDR({}))"
       "->compare_exchange_strong({}.{}, {}({}.{}), "
       "std::memory_order_acq_rel, std::memory_order_acquire);",
-      ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
-      field);
+      ctx.cr(0), ctx.reserved_address(), ctx.ea(), ptr_type, ctx.ea(), ctx.reserved(), field,
+      bswap_func, ctx.r(ctx.insn.operands[0]), field);
+  ctx.println("\t{} = ~uint64_t(0);", ctx.reserved_address());
 }
 
 //=============================================================================

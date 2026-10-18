@@ -14,7 +14,9 @@
 
 #include <rex/platform/dynlib.h>
 
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || REX_PLATFORM_SWITCH
+// Switch: renderdoc_app.h only recognizes Windows and Linux and aborts with "Unknown
+// platform" (devkitA64 does not define __linux__). RenderDoc does not exist on Horizon either.
 struct RENDERDOC_API_1_0_0;
 #else
 #include <renderdoc_app.h>

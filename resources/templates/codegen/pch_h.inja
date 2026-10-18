@@ -78,6 +78,16 @@ extern PPCFuncMapping PPCFuncMappings[];
     [[clang::musttail]] return __imp__##name(ctx, base);                            \
   }                                                                                 \
   extern "C" void __imp__##name([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
+#elif defined(__GNUC__) && !defined(__clang__)
+// GCC rejects attributes ahead of extern "C" ("attributes are not permitted in
+// this position") and drops them silently: the weak alias is never emitted and
+// the link fails much later with thousands of undefined sub_ symbols. After
+// the declarator it emits both, __imp__ as the entry and the bare name as its
+// weak alias (checked in the symbol table of a devkitA64 build).
+#define DEFINE_REX_FUNC(name)                                       \
+  extern "C" REX_FUNC(name)                                         \
+      __attribute__((alias("__imp__" #name), weak, noinline));      \
+  REX_EXTERN(__imp__##name)
 #else
 #define DEFINE_REX_FUNC(name)                                       \
   __attribute__((alias("__imp__" #name)))                           \

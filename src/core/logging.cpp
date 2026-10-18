@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <spdlog/async.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
@@ -44,7 +45,15 @@ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets lev
 
 REXCVAR_DEFINE_BOOL(log_noisy, false, "Log", "Enable noisy/high-frequency log macros");
 
-REXCVAR_DEFINE_INT32(log_flush_interval, 0, "Log", "Periodic flush interval in seconds (0 = off)")
+/*
+ * Periodic flush once per second (0 turns it off).
+ *
+ * It goes together with flush_level being `warn` instead of `info` (see rex/logging/types.h):
+ * normal lines are not written to the SD one by one from the thread that logs them. This spdlog
+ * thread flushes them once per second. It is joined in its destructor, not detached, so it is
+ * safe on Horizon.
+ */
+REXCVAR_DEFINE_INT32(log_flush_interval, 1, "Log", "Periodic flush interval in seconds (0 = off)")
     .range(0, 60)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
@@ -54,6 +63,51 @@ REXCVAR_DEFINE_INT32(log_max_file_size_mb, 5, "Log", "Max log file size in MB be
 
 REXCVAR_DEFINE_INT32(log_max_files, 20, "Log", "Max number of rotated log files to keep")
     .range(1, 100)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+/*
+ * log_async: write the log from a separate thread. Off by default: it made stutter much worse.
+ *
+ * The log itself is a source of stutter. The periodic report writes ~250 long lines every 10 seconds
+ * from the ring thread, the one that feeds the GPU. With the synchronous logger, that thread formats
+ * the lines and writes them to the SD file itself. Measured over 191 race stutters: during the 2-3 s
+ * the dump lasts, the rate of frames over 60 ms is 1.03/s, against 0.34/s outside it: three times as
+ * high, with the GPU at its normal value (28.7 ms) and no work counter spiking. About 29 stutters per
+ * session are self-inflicted.
+ *
+ * With log_async, the logging thread only enqueues: pattern formatting and the trip to the SD are
+ * done by a separate spdlog thread. The queue holds 8,192 messages (log_async_cola) and the policy is
+ * to block when it is full.
+ *
+ * ================================================================================================
+ *  With log_async on, the console did much worse. Do not turn it on as it is.
+ *
+ *  953 stutters against 226 with the synchronous logger, whole stretches with 0 % of the frames
+ *  under 33.3 ms, frames of 1,050 ms, and an unplayable stretch.
+ *
+ *  The telltale sign is that CPU usage drops while FPS sinks:
+ *      CPU total   266 %  ->  179-233 %
+ *      ring       75.7 %  ->  50-72 %
+ *      game       68.9 %  ->  25-48 %
+ *  and the stutters come with `GPU 0.0 reales, grabar 0.4`: a whole second of frame with nobody
+ *  working. That is a blocked thread, not work.
+ *
+ *  Two design mistakes:
+ *   1. `async_overflow_policy::block` blocks the writing thread when the queue fills up. The
+ *      writer is the ring thread, the one that feeds the GPU.
+ *   2. The spdlog pool thread inherits the priority of the thread that creates it, and on Horizon
+ *      only priority 0x3B is time-sliced: with 3 cores busy with audio (0x2B), presentation
+ *      (0x2C) and the ring (0x2D), that thread may almost never run. Queue full -> every REXLOG
+ *      call blocks. See docs/platform-notes.md (Threads).
+ * ================================================================================================
+ */
+REXCVAR_DEFINE_BOOL(log_async, false, "Log",
+                    "Escribir el log desde un hilo aparte (el hilo que llama solo encola). Quita los "
+                    "tirones del volcado periodico; false pierde los ultimos mensajes si hay cuelgue")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_INT32(log_async_cola, 8192, "Log", "Mensajes que caben en la cola del log asincrono")
+    .range(256, 65536)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
@@ -131,10 +185,21 @@ spdlog::level::level_enum ResolveCategoryLevel(const std::string& name) {
   return g_config.default_level;
 }
 
+// true once the spdlog thread pool is up (see log_async).
+bool g_async_listo = false;
+
 // Create a logger and register it
 std::shared_ptr<spdlog::logger> CreateCategoryLogger(const std::string& name) {
   auto sinks = BuildCategorySinks(name);
-  auto logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
+  std::shared_ptr<spdlog::logger> logger;
+  if (g_async_listo) {
+    // The logging thread only enqueues; formatting and writing are done by the spdlog thread.
+    logger = std::make_shared<spdlog::async_logger>(name, sinks.begin(), sinks.end(),
+                                                    spdlog::thread_pool(),
+                                                    spdlog::async_overflow_policy::block);
+  } else {
+    logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
+  }
   logger->set_level(ResolveCategoryLevel(name));
   logger->flush_on(g_config.flush_level);
   spdlog::register_logger(logger);
@@ -236,6 +301,13 @@ void InitLogging(const LogConfig& config) {
 
   g_extra_sinks = config.extra_sinks;
 
+  // The spdlog pool, before the loggers are rebuilt (see log_async). A single thread: log lines have to
+  // keep their usual order.
+  if (REXCVAR_GET(log_async) && !g_async_listo) {
+    spdlog::init_thread_pool(static_cast<size_t>(REXCVAR_GET(log_async_cola)), 1);
+    g_async_listo = true;
+  }
+
   // Rebuild all loggers with new sinks
   for (auto& entry : g_registry) {
     if (entry.name.empty())
@@ -278,7 +350,8 @@ void ShutdownLogging() {
     if (entry.logger)
       entry.logger->flush();
 
-  spdlog::shutdown();
+  spdlog::shutdown();  // also joins the async pool thread
+  g_async_listo = false;
   g_registry.clear();
   g_console_sink.reset();
   g_file_sink.reset();

@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -65,6 +66,11 @@ class InputSystem : public system::IInputSystem {
   // does not renumber pad two.
   std::vector<DeviceInfo> devices_;
   std::vector<InputDriver*> device_owners_;
+
+  // nfsmw: when the controllers were last enumerated, in steady_clock nanoseconds. RefreshDevices used
+  // to be called on every GetState, SetState and GetCapabilities from the game (several per frame),
+  // allocating memory and querying every driver each time. See RefreshDevices.
+  std::atomic<int64_t> ultimo_refresco_ns_{0};
 };
 
 /// Create a default InputSystem with SDL + NOP drivers.

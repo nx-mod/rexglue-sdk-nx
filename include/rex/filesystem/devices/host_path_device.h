@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include <rex/filesystem/device.h>
@@ -18,6 +19,23 @@
 namespace rex::filesystem {
 
 class HostPathEntry;
+
+/*
+ * How much SD work the path lookup saves.
+ *
+ * misses_en_seco  = times a missing path was resolved using only the in-memory tree (before, each of
+ *                   these was a stat plus a full enumeration of the parent directory: ~32 ms).
+ * stats_en_sd     = stats of the exact name that did reach the disk.
+ * barridos_en_sd  = full enumerations of a directory (the expensive part: one stat per entry).
+ * entradas_en_arbol = files and folders Initialize left loaded in memory.
+ */
+struct EstadisticasRutas {
+  uint64_t misses_en_seco = 0;
+  uint64_t stats_en_sd = 0;
+  uint64_t barridos_en_sd = 0;
+  uint64_t entradas_en_arbol = 0;
+};
+EstadisticasRutas LeerEstadisticasRutas();
 
 class HostPathDevice : public Device {
  public:

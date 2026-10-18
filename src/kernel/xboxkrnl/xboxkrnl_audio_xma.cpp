@@ -18,6 +18,10 @@
 #include <rex/audio/audio_system.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/kernel/xboxkrnl/private.h>
+#include <chrono>
+
+#include <rex/memory/utils.h>
+#include <rex/thread.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
 #include <rex/types.h>
@@ -206,8 +210,7 @@ u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_DATA> lo
 }
 
 u32 XMAGetInputBufferReadOffset_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.input_buffer_read_offset;
+  return XMA_CONTEXT_DATA::LoadWord(context_ptr, 2) & 0x03FFFFFF;
 }
 
 u32 XMASetInputBufferReadOffset_entry(mapped_void context_ptr, u32 value) {
@@ -240,8 +243,8 @@ u32 XMASetInputBuffer0_entry(mapped_void context_ptr, mapped_void buffer, u32 pa
 }
 
 u32 XMAIsInputBuffer0Valid_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.input_buffer_0_valid;
+  // One-word polls: avoid acquiring the other fifteen for nothing.
+  return (XMA_CONTEXT_DATA::LoadWord(context_ptr, 0) >> 20) & 1;
 }
 
 u32 XMASetInputBuffer0Valid_entry(mapped_void context_ptr) {
@@ -274,8 +277,7 @@ u32 XMASetInputBuffer1_entry(mapped_void context_ptr, mapped_void buffer, u32 pa
 }
 
 u32 XMAIsInputBuffer1Valid_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.input_buffer_1_valid;
+  return (XMA_CONTEXT_DATA::LoadWord(context_ptr, 0) >> 21) & 1;
 }
 
 u32 XMASetInputBuffer1Valid_entry(mapped_void context_ptr) {
@@ -287,8 +289,7 @@ u32 XMASetInputBuffer1Valid_entry(mapped_void context_ptr) {
 }
 
 u32 XMAIsOutputBufferValid_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.output_buffer_valid;
+  return XMA_CONTEXT_DATA::LoadWord(context_ptr, 1) >> 31;
 }
 
 u32 XMASetOutputBufferValid_entry(mapped_void context_ptr) {
@@ -299,9 +300,144 @@ u32 XMASetOutputBufferValid_entry(mapped_void context_ptr) {
   return 0;
 }
 
+/*
+ * The two fields the game polls in a loop
+ *
+ * Building an XMA_CONTEXT_DATA means reading and byte-swapping all 16 words of the
+ * context, and these two functions did that to return 5 bits.
+ *
+ * Measured on Switch during a race: the game's audio thread at 93.8% of a core,
+ * split between these two functions and copy_and_swap_32_unaligned. It is the same
+ * polling loop that was free on the 360, because there the field was in a decoder
+ * register.
+ *
+ * Here only the word that holds the field is read. The offsets are derived from the
+ * structure itself and checked at startup below (XmaOffsetCheck): if someone moves a
+ * field, the check fails instead of returning garbage and muting the audio.
+ */
+namespace {
+
+/* DWORD 9, bits 0-4 (output_buffer_read_offset). */
+constexpr size_t kXmaReadOffsetWord = 9;
+constexpr unsigned kXmaReadOffsetShift = 0;
+
+/*
+ * DWORD 0, bits 27-31 (output_buffer_write_offset): before it come
+ * input_buffer_0_packet_count (12), loop_count (8), input_buffer_0_valid (1),
+ * input_buffer_1_valid (1) and output_buffer_block_count (5).
+ */
+constexpr size_t kXmaWriteOffsetWord = 0;
+constexpr unsigned kXmaWriteOffsetShift = 27;
+
+constexpr u32 kXmaOffsetMask = 0x1F;
+
+/*
+ * The safety net: a context is built with the field set to all ones, and it is
+ * checked that the field lands where the constants above say.
+ */
+constexpr u32 XmaProbeWord(unsigned shift) { return kXmaOffsetMask << shift; }
+
+inline u32 XmaContextField(const void* context_ptr, size_t word, unsigned shift) {
+  // Also acquire the samples published through the index; required on ARM64.
+  return (XMA_CONTEXT_DATA::LoadWord(context_ptr, word) >> shift) & kXmaOffsetMask;
+}
+
+/*
+ * Disabled on purpose, and measured
+ *
+ * This brake never ran even once on the console. The profiler records the stack of
+ * every sample: of the 63 samples that landed inside rex::thread::Sleep during a
+ * whole session, none came from here. They all came from KeDelayExecutionThread (the
+ * game itself sleeping), from the GPU vsync or from WAIT_REG_MEM.
+ *
+ * That is: the game does not spin idle on these two functions long enough to reach
+ * 32 iterations. The premise was false. The code stays written, but off, so it is
+ * not proposed again.
+ *
+ * What did help from that work is the fast field read above (XmaContextField): two
+ * instructions instead of swapping the 16 integers of the context. That one stays on.
+ */
+#if 0
+/*
+ * The polling loop brake
+ *
+ * The game asks for the decoder position in a tight loop while it waits for data. On
+ * the 360 that was free (it was a register of the audio chip) and there were six
+ * hardware threads to spare. Here it eats a whole core of the three Horizon leaves to
+ * the application: measured in a race, 98.5%.
+ *
+ * Making the answer cheaper does not fix a tight loop: it only makes it spin more.
+ * What has to be done is put the thread to sleep, which is what MarathonRecomp-NX and
+ * UnleashedRecomp-NX do in all their waits (and for the same reason yield is not
+ * used: on Horizon, yielding does not get a lower-priority thread queued on the same
+ * core to run).
+ *
+ * It only sleeps when it is clear the game is spinning idle: same context and same
+ * answer kVueltasEnVacio times in a row. The first query, and any whose answer
+ * changes, return immediately, so no latency is added to audio that is progressing.
+ *
+ * 50 us is less than a hundredth of an audio block (a block is 256 samples, about
+ * 5.3 ms at 48 kHz), so the decoder has plenty of time to advance before the game
+ * looks again.
+ */
+constexpr unsigned kVueltasEnVacio = 32;
+constexpr auto kDormir = std::chrono::microseconds(50);
+
+/*
+ * Two bugs of the first version, measured on the console
+ *
+ * 1. A single value for both functions. The game's loop alternates between the two
+ *    queries, so the stored value changed on every call, the counter was always
+ *    reset and it never got to sleep. The thread stayed the same, at 93.9%. Now
+ *    each function has its own last value and the counter only resets when its own
+ *    value changes.
+ *
+ * 2. thread_local is expensive here. devkitA64 compiles with -mtp=soft, so every
+ *    access to a thread-local variable is a call to __aarch64_read_tp. In the
+ *    profile it was among the most expensive parts of the function. Since this is a
+ *    heuristic (being wrong only costs one nap too many or too few), plain global
+ *    state is enough: if two threads polled at the same time, the worst case is
+ *    that one sleeps when it should not.
+ */
+struct EstadoSondeo {
+  const void* contexto = nullptr;
+  u32 ultima_lectura = ~0u;
+  u32 ultima_escritura = ~0u;
+  unsigned vueltas = 0;
+};
+EstadoSondeo g_sondeo;
+
+void FrenarSondeo(const void* context_ptr, u32 valor, bool es_lectura) {
+  EstadoSondeo& e = g_sondeo;
+  u32& ultimo = es_lectura ? e.ultima_lectura : e.ultima_escritura;
+
+  if (context_ptr != e.contexto) {
+    e.contexto = context_ptr;
+    e.ultima_lectura = ~0u;
+    e.ultima_escritura = ~0u;
+    e.vueltas = 0;
+    ultimo = valor;
+    return;
+  }
+  if (valor != ultimo) {
+    ultimo = valor;
+    e.vueltas = 0;  // something moved: the game is not spinning idle
+    return;
+  }
+  if (++e.vueltas >= kVueltasEnVacio) {
+    rex::thread::Sleep(kDormir);
+  }
+}
+#else
+inline void FrenarSondeo(const void*, u32, bool) {}
+#endif
+
+}  // namespace
+
 u32 XMAGetOutputBufferReadOffset_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.output_buffer_read_offset;
+  const u32 valor = XmaContextField(context_ptr, kXmaReadOffsetWord, kXmaReadOffsetShift);
+  FrenarSondeo(context_ptr, valor, true);
+  return valor;
 }
 
 u32 XMASetOutputBufferReadOffset_entry(mapped_void context_ptr, u32 value) {
@@ -313,13 +449,42 @@ u32 XMASetOutputBufferReadOffset_entry(mapped_void context_ptr, u32 value) {
 }
 
 u32 XMAGetOutputBufferWriteOffset_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.output_buffer_write_offset;
+  const u32 valor = XmaContextField(context_ptr, kXmaWriteOffsetWord, kXmaWriteOffsetShift);
+  FrenarSondeo(context_ptr, valor, false);
+  return valor;
 }
 
+/*
+ * Check of the offsets against the real structure. A context is built in
+ * big-endian memory with a single field set to all ones, and the fast read must
+ * find it where it belongs.
+ */
+namespace {
+
+struct XmaOffsetCheck {
+  XmaOffsetCheck() {
+    uint32_t crudo[sizeof(XMA_CONTEXT_DATA) / 4] = {};
+    XMA_CONTEXT_DATA c(crudo);
+    c.output_buffer_read_offset = kXmaOffsetMask;
+    c.Store(crudo);
+    assert_true(XmaContextField(crudo, kXmaReadOffsetWord, kXmaReadOffsetShift) ==
+                kXmaOffsetMask);
+
+    std::memset(crudo, 0, sizeof(crudo));
+    XMA_CONTEXT_DATA w(crudo);
+    w.output_buffer_write_offset = kXmaOffsetMask;
+    w.Store(crudo);
+    assert_true(XmaContextField(crudo, kXmaWriteOffsetWord, kXmaWriteOffsetShift) ==
+                kXmaOffsetMask);
+  }
+};
+
+const XmaOffsetCheck g_xma_offset_check;
+
+}  // namespace
+
 u32 XMAGetPacketMetadata_entry(mapped_void context_ptr) {
-  XMA_CONTEXT_DATA context(context_ptr);
-  return context.packet_metadata;
+  return (XMA_CONTEXT_DATA::LoadWord(context_ptr, 4) >> 26) & 0x1F;
 }
 
 u32 XMAEnableContext_entry(mapped_void context_ptr) {

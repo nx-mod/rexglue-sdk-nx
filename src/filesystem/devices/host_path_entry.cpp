@@ -56,6 +56,25 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
     REXFS_ERROR("Attempting to open file for write access on read-only device");
     return X_STATUS_ACCESS_DENIED;
   }
+  /*
+   * A folder is not opened as a file.
+   *
+   * On the Xbox 360, opening a directory is legal: games do it to enumerate it or just to check that
+   * the drive is mounted. NFSMW opens the root of its save container ("rmcsave:\") right after
+   * mounting it, and this code used to try to open a FILE* on that folder. That always fails,
+   * NO_SUCH_FILE was returned, and the game read it as "this save cannot be used": hence the
+   * "damaged profile" on load. Creating a profile did not hit it, because then the game writes a
+   * real file inside.
+   *
+   * A File without a handle is enough: what is done with a directory is enumerating it, and
+   * XFile::QueryDirectory walks the entry tree without touching the disk. Reads and writes on it
+   * are rejected further down.
+   */
+  if (attributes_ & kFileAttributeDirectory) {
+    *out_file = new HostPathFile(desired_access, this, nullptr);
+    return X_STATUS_SUCCESS;
+  }
+
   auto file_handle = rex::filesystem::FileHandle::OpenExisting(
       host_path_, desired_access, static_cast<HostPathDevice*>(device_)->allow_share_delete());
   if (!file_handle) {

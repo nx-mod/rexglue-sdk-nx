@@ -29,10 +29,15 @@ target_include_directories(rexinput PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-if(WIN32)
+if(REXGLUE_PLATFORM_SWITCH)
+    target_sources(rexinput PRIVATE switch/switch_input_driver.cpp)
+elseif(WIN32)
     target_sources(rexinput PRIVATE sdl/sdl_input_driver.cpp xinput/xinput_input_driver.cpp)
 else()
     target_sources(rexinput PRIVATE sdl/sdl_input_driver.cpp)
 endif()
 
-target_link_libraries(rexinput PUBLIC rexcore rexui SDL3::SDL3)
+target_link_libraries(rexinput PUBLIC rexcore rexui)
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    target_link_libraries(rexinput PUBLIC SDL3::SDL3)
+endif()

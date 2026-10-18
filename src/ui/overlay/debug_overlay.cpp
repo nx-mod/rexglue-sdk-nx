@@ -10,8 +10,14 @@
  *              See LICENSE file in the project root for full license text.
  */
 #include <rex/ui/overlay/debug_overlay.h>
+#include <rex/platform.h>
 #include <rex/version.h>
 #include <imgui.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
 #include <rex/perf/counter.h>
 #include <cinttypes>
@@ -19,20 +25,131 @@
 
 namespace rex::ui {
 
-DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
-    : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {}
+namespace {
+// Live debug overlays (queried by the Switch input driver).
+std::atomic<int> g_debug_overlays{0};
+}  // namespace
 
-DebugOverlayDialog::~DebugOverlayDialog() {}
+bool DebugOverlayAbierto() { return g_debug_overlays.load(std::memory_order_relaxed) > 0; }
+
+DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
+    : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {
+  g_debug_overlays.fetch_add(1, std::memory_order_relaxed);
+}
+
+DebugOverlayDialog::~DebugOverlayDialog() { g_debug_overlays.fetch_sub(1, std::memory_order_relaxed); }
+
+// On the TV there is no touch screen to drag it with. With L and R held, the right stick moves it at
+// the UI's pace, which repaints continuously while it is open. The position is restored when it opens
+// and saved one second after it stops moving, also when it was dragged with a finger.
+void DebugOverlayDialog::PositionBeforeBegin(ImGuiIO& io) {
+  if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f) {
+    return;
+  }
+  if (!position_loaded_) {
+    position_loaded_ = true;
+    if (!position_file_.empty()) {
+      std::ifstream f(position_file_);
+      float x = 0.0f;
+      float y = 0.0f;
+      if (f >> x >> y && x >= 0.0f && x <= 1.0f && y >= 0.0f && y <= 1.0f) {
+        position_x_ = saved_x_ = x;
+        position_y_ = saved_y_ = y;
+        position_known_ = true;
+        position_apply_ = true;
+      }
+    }
+  }
+  // When the screen size changes (console <-> TV) it is put back at its fractional position.
+  if (io.DisplaySize.x != display_w_ || io.DisplaySize.y != display_h_) {
+    display_w_ = io.DisplaySize.x;
+    display_h_ = io.DisplaySize.y;
+    position_apply_ = position_known_;
+  }
+  const auto analog = [&io](ImGuiKey key) { return io.KeysData[key - ImGuiKey_NamedKey_BEGIN].AnalogValue; };
+  const bool lr = ImGui::IsKeyDown(ImGuiKey_GamepadL1) && ImGui::IsKeyDown(ImGuiKey_GamepadR1);
+  const float dx = analog(ImGuiKey_GamepadRStickRight) - analog(ImGuiKey_GamepadRStickLeft);
+  const float dy = analog(ImGuiKey_GamepadRStickDown) - analog(ImGuiKey_GamepadRStickUp);
+  moved_by_stick_ = false;
+  if (lr && position_known_ && (dx != 0.0f || dy != 0.0f)) {
+    // At full tilt, 80 % of the screen height per second, on both axes.
+    const float paso = 0.8f * io.DisplaySize.y * io.DeltaTime;
+    position_x_ += dx * paso / io.DisplaySize.x;
+    position_y_ += dy * paso / io.DisplaySize.y;
+    position_apply_ = true;
+    moved_by_stick_ = true;
+    last_move_time_ = ImGui::GetTime();
+  }
+  if (position_apply_) {
+    position_apply_ = false;
+    position_x_ = std::clamp(position_x_, 0.0f, 1.0f);
+    position_y_ = std::clamp(position_y_, 0.0f, 1.0f);
+    ImGui::SetNextWindowPos(ImVec2(position_x_ * io.DisplaySize.x, position_y_ * io.DisplaySize.y),
+                            ImGuiCond_Always);
+  }
+}
+
+void DebugOverlayDialog::PositionAfterBegin(ImGuiIO& io) {
+  if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f) {
+    return;
+  }
+  // Fully inside the screen: when moving it, dragging it or switching from the console to the TV.
+  const ImVec2 pos = ImGui::GetWindowPos();
+  const ImVec2 size = ImGui::GetWindowSize();
+  const float x = std::clamp(pos.x, 0.0f, std::max(0.0f, io.DisplaySize.x - size.x));
+  const float y = std::clamp(pos.y, 0.0f, std::max(0.0f, io.DisplaySize.y - size.y));
+  const bool fuera = x != pos.x || y != pos.y;
+  if (!position_known_) {
+    // First time without a saved position: take the current one, without writing anything.
+    position_x_ = saved_x_ = x / io.DisplaySize.x;
+    position_y_ = saved_y_ = y / io.DisplaySize.y;
+    position_known_ = true;
+    position_apply_ = fuera;
+    return;
+  }
+  // ImGui rounds the position to the pixel: with the stick the fraction is kept, so that a gentle tilt
+  // moves it too. Without the stick and more than one pixel from where it was placed, a finger has
+  // dragged it.
+  const bool arrastrada = !moved_by_stick_ && (std::abs(x - position_x_ * io.DisplaySize.x) > 1.0f ||
+                                               std::abs(y - position_y_ * io.DisplaySize.y) > 1.0f);
+  if (fuera || arrastrada) {
+    position_x_ = x / io.DisplaySize.x;
+    position_y_ = y / io.DisplaySize.y;
+    position_apply_ = fuera;  // corrected on the next frame
+  }
+  if (arrastrada) {
+    last_move_time_ = ImGui::GetTime();
+  }
+  if (!position_file_.empty() && ImGui::GetTime() - last_move_time_ > 1.0 &&
+      (std::abs(position_x_ - saved_x_) > 1e-3f || std::abs(position_y_ - saved_y_) > 1e-3f)) {
+    std::ofstream f(position_file_, std::ios::trunc);
+    f << std::fixed << std::setprecision(4) << position_x_ << ' ' << position_y_ << '\n';
+    // Even if the write fails: it is not retried every frame.
+    saved_x_ = position_x_;
+    saved_y_ = position_y_;
+  }
+}
 
 void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+#if REX_PLATFORM_SWITCH
+  PositionBeforeBegin(io);
+#endif
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   ImGui::SetNextWindowSize(ImVec2(280, 280), ImGuiCond_FirstUseEver);
 #else
   ImGui::SetNextWindowSize(ImVec2(220, 60), ImGuiCond_FirstUseEver);
 #endif
   ImGui::SetNextWindowBgAlpha(0.5f);
-  if (ImGui::Begin("Debug##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
+  // It only shows data: no navigation and no focus when it appears. On Switch
+  // the menus are driven with the game controller, and opening this overlay
+  // (L+R+Up) must not take the controller away while driving.
+  if (ImGui::Begin("Debug##overlay", nullptr,
+                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavInputs |
+                       ImGuiWindowFlags_NoFocusOnAppearing)) {
+#if REX_PLATFORM_SWITCH
+    PositionAfterBegin(io);
+#endif
     if (stats_provider_) {
       auto stats = stats_provider_();
       if (stats.frame_count > 0) {

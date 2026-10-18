@@ -10,7 +10,18 @@
 */
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <set>
+#include <system_error>
+#include <thread>
+#include <vector>
 
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
@@ -20,6 +31,8 @@
 #include <rex/memory/ring_buffer.h>
 #include <rex/platform.h>
 #include <rex/stream.h>
+#include <rex/cvar.h>
+#include <rex/filesystem.h>
 
 extern "C" {
 #if REX_COMPILER_MSVC
@@ -35,6 +48,230 @@ extern "C" {
 
 // Credits for most of this code goes to:
 // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
+
+REXCVAR_DEFINE_INT32(audio_volcado_xma_s, 0, "Audio",
+                     "Diagnostico: segundos de cada contexto XMA que se guardan en "
+                     "xma_<contexto>_tramas/salida_<hz>.wav junto al ejecutable; 0 = nada");
+REXCVAR_DEFINE_INT32(audio_volcado_xma_desde_s, 0, "Audio",
+                     "Diagnostico: segundos desde el primer audio XMA antes de empezar a volcar");
+REXCVAR_DEFINE_INT32(audio_volcado_xma_contextos, 12, "Audio",
+                     "Diagnostico: contextos XMA que se vuelcan como mucho");
+REXCVAR_DEFINE_INT32(audio_volcado_xma_mb, 32, "Audio",
+                     "Diagnostico: megas como mucho de audio XMA acumulado sin escribir");
+REXCVAR_DEFINE_INT32(audio_volcado_xma_min_s, 2, "Audio",
+                     "Diagnostico: segundos minimos de un sonido XMA que se guardan cuando termina");
+
+namespace {
+
+// Robotic audio diagnostic: 16-bit big-endian PCM of an XMA context, kept in memory until the
+// requested seconds are collected, then written as a little-endian WAV in one go.
+struct VolcadoXma {
+  uint32_t frecuencia = 0;
+  uint32_t canales = 0;
+  std::vector<int16_t> muestras;
+  bool escrito = false;
+  uint32_t secuencia = 0;  // segment number in the file name
+};
+
+std::mutex volcado_xma_mutex;
+std::map<std::pair<uint32_t, int>, VolcadoXma> volcados_xma;  // (contexto, 0 tramas / 1 salida)
+uint32_t ficheros_volcados_xma = 0;
+uint32_t secuencia_volcados_xma = 0;
+uint32_t anotados_xma = 0;
+size_t muestras_acumuladas_xma = 0;  // total of the dumps not yet written
+// Contexts currently accumulating (at most audio_volcado_xma_contextos): with all of them at once
+// the memory cap filled up and none got written.
+std::set<uint32_t> contextos_volcados_xma;
+bool volcado_xma_con_reloj = false;
+std::chrono::steady_clock::time_point volcado_xma_inicio;
+
+// Written on a separate thread: on the Switch SD the file can take a while, and the caller holds
+// the context lock on the game's audio thread.
+void EscribirVolcadoXmaEnHilo(uint32_t contexto, int tipo, const VolcadoXma& v) {
+  const std::string numero = std::to_string(contexto);
+  const auto ruta = rex::filesystem::GetExecutableFolder() /
+                    ("xma_" + std::string(numero.size() < 3 ? 3 - numero.size() : 0, '0') + numero + "_" +
+                     std::to_string(v.secuencia) + (tipo ? "_salida_" : "_tramas_") +
+                     std::to_string(v.frecuencia) + ".wav");
+  std::ofstream fichero(ruta, std::ios::binary | std::ios::trunc);
+  if (!fichero) {
+    return;
+  }
+  const uint32_t bytes = uint32_t(v.muestras.size() * 2);
+  const auto u32 = [&](uint32_t x) { fichero.write(reinterpret_cast<const char*>(&x), 4); };
+  const auto u16 = [&](uint16_t x) { fichero.write(reinterpret_cast<const char*>(&x), 2); };
+  fichero.write("RIFF", 4);
+  u32(36 + bytes);
+  fichero.write("WAVEfmt ", 8);
+  u32(16);
+  u16(1);  // PCM
+  u16(uint16_t(v.canales));
+  u32(v.frecuencia);
+  u32(v.frecuencia * v.canales * 2);
+  u16(uint16_t(v.canales * 2));
+  u16(16);
+  fichero.write("data", 4);
+  u32(bytes);
+  fichero.write(reinterpret_cast<const char*>(v.muestras.data()), bytes);
+  REXAPU_INFO("XMA: volcado {} del contexto {}: {} muestras a {} Hz, {} canales",
+              tipo ? "de salida" : "de tramas", contexto, v.muestras.size() / v.canales,
+              v.frecuencia, v.canales);
+}
+
+// Dumps are written on a single thread that lives until the process ends: on the Switch SD a file
+// can take seconds and the game's audio thread must not wait for that. There is no thread per file:
+// on the Switch, std::thread::detach() threw std::system_error (the writer thread had already
+// finished) and the game closed. If the thread cannot be created, the file is written immediately.
+class EscritorVolcados {
+ public:
+  static void Encolar(std::function<void()> trabajo) {
+    static EscritorVolcados* const escritor = Crear();  // never destroyed
+    if (!escritor) {
+      trabajo();
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> cerrojo(escritor->mutex_);
+      escritor->cola_.push_back(std::move(trabajo));
+    }
+    escritor->aviso_.notify_one();
+  }
+
+ private:
+  EscritorVolcados() : hilo_([this]() { Bucle(); }) {}
+
+  static EscritorVolcados* Crear() {
+    try {
+      return new EscritorVolcados();
+    } catch (const std::system_error&) {
+      return nullptr;
+    }
+  }
+
+  void Bucle() {
+    for (;;) {
+      std::function<void()> trabajo;
+      {
+        std::unique_lock<std::mutex> cerrojo(mutex_);
+        aviso_.wait(cerrojo, [this]() { return !cola_.empty(); });
+        trabajo = std::move(cola_.front());
+        cola_.pop_front();
+      }
+      trabajo();
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable aviso_;
+  std::deque<std::function<void()>> cola_;
+  std::thread hilo_;  // last: it starts with the other members already constructed
+};
+
+void EscribirVolcadoXma(uint32_t contexto, int tipo, VolcadoXma& v) {
+  VolcadoXma copia;
+  copia.frecuencia = v.frecuencia;
+  copia.canales = v.canales;
+  copia.secuencia = v.secuencia;
+  copia.muestras = std::move(v.muestras);
+  EscritorVolcados::Encolar([contexto, tipo, copia = std::move(copia)]() {
+    EscribirVolcadoXmaEnHilo(contexto, tipo, copia);
+  });
+}
+
+void VolcarXma(uint32_t contexto, int tipo, uint32_t frecuencia, uint32_t canales, const uint8_t* be,
+               size_t bytes) {
+  const int32_t segundos = REXCVAR_GET(audio_volcado_xma_s);
+  if (segundos <= 0 || !frecuencia || !canales) {
+    return;
+  }
+  std::lock_guard<std::mutex> cerrojo(volcado_xma_mutex);
+  if (!volcado_xma_con_reloj) {
+    volcado_xma_con_reloj = true;
+    volcado_xma_inicio = std::chrono::steady_clock::now();
+  }
+  if (std::chrono::steady_clock::now() - volcado_xma_inicio <
+      std::chrono::seconds(std::max(REXCVAR_GET(audio_volcado_xma_desde_s), 0))) {
+    return;
+  }
+  if (ficheros_volcados_xma >= 2 * uint32_t(std::max(REXCVAR_GET(audio_volcado_xma_contextos), 0))) {
+    return;
+  }
+  if (const auto escrito = volcados_xma.find({contexto, tipo});
+      escrito != volcados_xma.end() && escrito->second.escrito) {
+    return;
+  }
+  if (!contextos_volcados_xma.count(contexto)) {
+    if (contextos_volcados_xma.size() >=
+        size_t(std::max(REXCVAR_GET(audio_volcado_xma_contextos), 0))) {
+      return;
+    }
+    contextos_volcados_xma.insert(contexto);
+  }
+  VolcadoXma& v = volcados_xma[{contexto, tipo}];
+  if (!v.muestras.empty() && (v.frecuencia != frecuencia || v.canales != canales)) {
+    // A different format in the same context: start over.
+    muestras_acumuladas_xma -= v.muestras.size();
+    v.muestras = std::vector<int16_t>();
+  }
+  if (v.muestras.empty() && tipo == 0 && anotados_xma < 64) {
+    ++anotados_xma;
+    REXAPU_INFO("XMA: contexto {} con audio a {} Hz, {} canales", contexto, frecuencia, canales);
+  }
+  if (v.muestras.empty()) {
+    v.secuencia = ++secuencia_volcados_xma;
+  }
+  v.frecuencia = frecuencia;
+  v.canales = canales;
+  const size_t tope = size_t(std::max(REXCVAR_GET(audio_volcado_xma_mb), 1)) * (1024 * 1024 / 2);
+  if (muestras_acumuladas_xma + bytes / 2 > tope) {
+    // It does not fit: this context starts over so the dump has no gap.
+    muestras_acumuladas_xma -= v.muestras.size();
+    v.muestras = std::vector<int16_t>();
+    return;
+  }
+  muestras_acumuladas_xma += bytes / 2;
+  for (size_t i = 0; i + 1 < bytes; i += 2) {
+    v.muestras.push_back(int16_t(uint16_t((uint16_t(be[i]) << 8) | be[i + 1])));
+  }
+  if (v.muestras.size() >= size_t(segundos) * frecuencia * canales) {
+    ++ficheros_volcados_xma;
+    v.escrito = true;
+    muestras_acumuladas_xma -= v.muestras.size();
+    EscribirVolcadoXma(contexto, tipo, v);  // takes the samples
+    v.muestras = std::vector<int16_t>();
+    const auto otro = volcados_xma.find({contexto, 1 - tipo});
+    if (otro == volcados_xma.end() || otro->second.escrito) {
+      contextos_volcados_xma.erase(contexto);  // it has written its part: frees its slot
+    }
+  }
+}
+
+// Another sound in the context: what was accumulated is no longer continuous with what follows.
+void ReiniciarVolcadoXma(uint32_t contexto) {
+  if (REXCVAR_GET(audio_volcado_xma_s) <= 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> cerrojo(volcado_xma_mutex);
+  for (int tipo = 0; tipo < 2; ++tipo) {
+    const auto it = volcados_xma.find({contexto, tipo});
+    if (it != volcados_xma.end() && !it->second.escrito) {
+      VolcadoXma& v = it->second;
+      muestras_acumuladas_xma -= v.muestras.size();
+      // The sound has ended: if it is long enough it is saved as a segment.
+      const size_t minimo = size_t(std::max(REXCVAR_GET(audio_volcado_xma_min_s), 1)) *
+                            std::max<uint32_t>(v.frecuencia, 1) * std::max<uint32_t>(v.canales, 1);
+      if (v.frecuencia && v.muestras.size() >= minimo &&
+          ficheros_volcados_xma < 2 * uint32_t(std::max(REXCVAR_GET(audio_volcado_xma_contextos), 0))) {
+        ++ficheros_volcados_xma;
+        EscribirVolcadoXma(contexto, tipo, v);
+      }
+      volcados_xma.erase(it);
+    }
+  }
+  contextos_volcados_xma.erase(contexto);  // the sound has ended: frees its slot
+}
+
+}  // namespace
 
 namespace rex::audio {
 
@@ -92,12 +329,55 @@ int XmaContext::Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr) {
   return 0;
 }
 
+/*
+ * NFSMW: silence watchdog, measurement only.
+ *
+ * In one recording, after braking in a corner, the engine acceleration sound takes ~2.5 s to come
+ * back, coinciding with a zone load. If the voice that goes quiet is XMA, it shows here: every time
+ * the game enables the context with an output buffer pending and the pass produces no PCM, a silence
+ * starts (or continues); when it produces again, if the silence lasted 50 ms or more, a log line
+ * gives the context, how long it lasted, how many empty passes there were and why (1 only flush
+ * without subframes, 2 no input, 3 no progress, 4 error). Contexts that never sound again (end of a
+ * sound) write nothing. It does not change anything that is decoded. At most 200 lines per run.
+ */
+void XmaContext::AnotarProduccion(bool produjo, uint8_t motivo, const XMA_CONTEXT_DATA& data) {
+  static std::atomic<uint32_t> lineas{0};
+  const auto ahora = std::chrono::steady_clock::now();
+  if (!produjo) {
+    if (!en_silencio_) {
+      en_silencio_ = true;
+      silencio_desde_ = ahora;
+      silencio_pasadas_ = 0;
+    }
+    ++silencio_pasadas_;
+    silencio_motivo_ = motivo;
+    return;
+  }
+  if (!en_silencio_) {
+    return;
+  }
+  en_silencio_ = false;
+  const double ms = std::chrono::duration<double, std::milli>(ahora - silencio_desde_).count();
+  if (ms >= 50.0 && lineas.fetch_add(1, std::memory_order_relaxed) < 200) {
+    REXLOG_INFO("[xma] silencio: el contexto {} estuvo {:.0f} ms sin producir y vuelve a sonar ({} pasadas vacias, "
+                "ultimo motivo {}: 1 solo vaciar, 2 sin entrada, 3 sin avance, 4 error; entradas {}{}, bufer actual {}, "
+                "bucles {})",
+                id_, ms, silencio_pasadas_, silencio_motivo_, uint32_t(data.input_buffer_0_valid),
+                uint32_t(data.input_buffer_1_valid), uint32_t(data.current_buffer), uint32_t(data.loop_count));
+  }
+}
+
 bool XmaContext::Work() {
   if (!is_allocated() || !is_enabled()) {
     return false;
   }
 
   std::lock_guard<std::mutex> lock(lock_);
+  // The immediate work and the XMA thread may have seen the same notification.
+  // Only one must consume it; Disable/Release also use this lock.
+  if (!is_allocated() || !is_enabled()) {
+    return false;
+  }
   set_is_enabled(false);
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
@@ -108,16 +388,39 @@ bool XmaContext::Work() {
     return true;
   }
 
+  // Avoid modulo by zero and accesses outside the guest buffer.
+  if (!data.output_buffer_block_count ||
+      data.output_buffer_read_offset >= data.output_buffer_block_count ||
+      data.output_buffer_write_offset >= data.output_buffer_block_count) {
+    data.error_status = 4;
+    data.output_buffer_valid = 0;
+    StoreContextMerged(data, initial_data, context_ptr);
+    return true;
+  }
+
   memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
+  uint32_t output_bytes_written = 0;
 
   // Consume-only context: no input, just drain remaining subframes.
   if (data.IsConsumeOnlyContext()) {
     if (current_frame_remaining_subframes_ == 0) {
       return true;
     }
-    Consume(&output_rb, &data);
+    // Flush all the PCM that fits, even if the packet size was set to zero.
+    // Consume returns zero when it has to wait for free space.
+    while (current_frame_remaining_subframes_) {
+      const uint32_t written = Consume(&output_rb, &data);
+      if (!written) {
+        break;
+      }
+      output_bytes_written += written;
+    }
     data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
+    if (output_bytes_written && output_rb.empty()) {
+      data.output_buffer_valid = 0;
+    }
     StoreContextMerged(data, initial_data, context_ptr);
+    AnotarProduccion(output_bytes_written != 0, 1, data);  // Measurement only
     return true;
   }
 
@@ -129,25 +432,51 @@ bool XmaContext::Work() {
 
   if (minimum_subframe_decode_count > remaining_subframe_blocks_in_output_buffer_) {
     StoreContextMerged(data, initial_data, context_ptr);
+    AnotarProduccion(true, 0, data);  // output full, not silence
     return true;
   }
 
+  uint8_t motivo_silencio = 0;  // Measurement only
   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
+    const uint32_t previous_offset = data.input_buffer_read_offset;
+    const uint32_t previous_buffer = data.current_buffer;
+    const auto previous_valid = data.input_buffer_0_valid | (data.input_buffer_1_valid << 1);
+    const uint32_t previous_loop_count = data.loop_count;
+    const uint8_t previous_subframes = current_frame_remaining_subframes_;
     Decode(&data);
-    Consume(&output_rb, &data);
+    const uint32_t written = Consume(&output_rb, &data);
+    output_bytes_written += written;
 
-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
+    // The last packet can leave several decoded subframes. If this returns with
+    // PCM pending, the consumer may wait for a full block without advancing the
+    // read position or re-enabling this context.
+    if ((!data.IsAnyInputBufferValid() && !current_frame_remaining_subframes_) ||
+        data.error_status == 4) {
+      motivo_silencio = data.error_status == 4 ? 4 : 2;
+      break;
+    }
+    // A frame's continuation may be missing while the producer refills the other
+    // buffer. Keep the state and release the lock until the next Enable, without
+    // spinning here or turning an input wait into an error.
+    if (!written && previous_offset == data.input_buffer_read_offset &&
+        previous_buffer == data.current_buffer &&
+        previous_valid == (data.input_buffer_0_valid | (data.input_buffer_1_valid << 1)) &&
+        previous_loop_count == data.loop_count &&
+        previous_subframes == current_frame_remaining_subframes_) {
+      motivo_silencio = 3;
       break;
     }
   }
 
   data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
 
-  if (output_rb.empty()) {
+  // Equal pointers mean full only if PCM was written this time.
+  if (output_bytes_written && output_rb.empty()) {
     data.output_buffer_valid = 0;
   }
 
   StoreContextMerged(data, initial_data, context_ptr);
+  AnotarProduccion(output_bytes_written != 0, motivo_silencio, data);  // Measurement only
   return true;
 }
 
@@ -190,6 +519,7 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
 }
 
 void XmaContext::ResetDecoderState() {
+  ReiniciarVolcadoXma(id());  // diagnostico audio_volcado_xma_s
   // A freed or re-initialized context is a new logical stream, so the previous
   // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
   // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
@@ -201,11 +531,7 @@ void XmaContext::ResetDecoderState() {
     av_context_->channels = 0;
   }
   raw_frame_.fill(0);
-  decoded_frame_.fill(0);
-  carry_frame_.fill(0);
-  carry_valid_ = false;
-  pending_output_limit_ = 0;
-  pending_start_skip_ = 0;
+  en_silencio_ = false;  // a new sound does not inherit the previous one's silence
   current_frame_remaining_subframes_ = 0;
   loop_frame_output_limit_ = 0;
   loop_start_skip_pending_ = false;
@@ -288,23 +614,26 @@ uint32_t XmaContext::GetAmountOfBitsToRead(uint32_t remaining_stream_bits, uint3
 
 const uint8_t* XmaContext::GetNextPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet_index,
                                          uint32_t current_input_packet_count) {
-  if (next_packet_index < current_input_packet_count) {
-    return memory()->TranslatePhysical(data->GetCurrentInputBufferAddress()) +
-           next_packet_index * kBytesPerPacket;
+  uint8_t buffer_index = data->current_buffer;
+  if (next_packet_index >= current_input_packet_count) {
+    buffer_index ^= 1;
+    next_packet_index -= current_input_packet_count;
   }
 
-  const uint8_t next_buffer_index = data->current_buffer ^ 1;
-  if (!data->IsInputBufferValid(next_buffer_index)) {
+  if (!data->IsInputBufferValid(buffer_index) ||
+      next_packet_index >= data->GetInputBufferPacketCount(buffer_index)) {
     return nullptr;
   }
 
-  const uint32_t next_buffer_address = data->GetInputBufferAddress(next_buffer_index);
+  const uint32_t next_buffer_address = data->GetInputBufferAddress(buffer_index);
   if (!next_buffer_address) {
     REXAPU_ERROR("XmaContext {}: Buffer marked valid but has null pointer!", id());
     return nullptr;
   }
 
-  return memory()->TranslatePhysical(next_buffer_address);
+  // The skip between packets may continue inside the second buffer.
+  // Always reading its start mixes the continuation with another audio stream.
+  return memory()->TranslatePhysical(next_buffer_address) + next_packet_index * kBytesPerPacket;
 }
 
 uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_packet_index,
@@ -313,13 +642,44 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
     uint8_t* next_packet = buffer + (next_packet_index * kBytesPerPacket);
     const uint32_t packet_frame_offset = xma::GetPacketFrameOffset(next_packet);
 
-    if (packet_frame_offset <= kMaxFrameSizeinBits) {
+    // The helper already includes the 32-bit header. Compare with the packet size,
+    // not with its payload: a frame can start in the last bits and continue in the
+    // next packet (Decode handles that split header).
+    if (packet_frame_offset < kBitsPerPacket) {
       return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
     }
     next_packet_index++;
   }
 
-  return kBitsPerPacketHeader;
+  // 32 is a valid offset: the first frame of the first packet.
+  return UINT32_MAX;
+}
+
+void XmaContext::AdvanceInputPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet_index) {
+  // At most the two available buffers are consumed. Keep pending skips when
+  // crossing them and search after packets with no new frames.
+  for (unsigned buffer = 0; buffer < 2; ++buffer) {
+    if (!data->IsCurrentInputBufferValid()) {
+      return;
+    }
+    const uint32_t count = data->GetCurrentInputBufferPacketCount();
+    if (!data->GetCurrentInputBufferAddress()) {
+      data->error_status = 4;
+      return;
+    }
+    if (next_packet_index < count) {
+      const uint32_t offset = GetNextPacketReadOffset(
+          GetCurrentInputBuffer(data), next_packet_index, count);
+      if (offset != UINT32_MAX) {
+        data->input_buffer_read_offset = offset;
+        return;
+      }
+      next_packet_index = 0;
+    } else {
+      next_packet_index -= count;
+    }
+    SwapInputBuffer(data);
+  }
 }
 
 memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
@@ -359,6 +719,15 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
 
   while (true) {
     if (stream.BitsRemaining() < kBitsPerFrameHeader) {
+      // A header that starts here may continue in the next packet. Counting it
+      // avoids marking the previous frame as the last one and skipping this one.
+      // Decode will join both fragments to get its full size.
+      if (stream.BitsRemaining()) {
+        if (stream.offset_bits() == frame_offset) {
+          packet_info.current_frame_ = packet_info.frame_count_;
+        }
+        packet_info.frame_count_++;
+      }
       break;
     }
 
@@ -422,9 +791,9 @@ void XmaContext::StoreContextMerged(const XMA_CONTEXT_DATA& data,
   fresh.Store(context_ptr);
 }
 
-void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
+uint32_t XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data) {
   if (!current_frame_remaining_subframes_) {
-    return;
+    return 0;
   }
 
   if (loop_frame_output_limit_ > 0) {
@@ -435,7 +804,7 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* 
       remaining_subframe_blocks_in_output_buffer_ -= data->output_buffer_padding;
       current_frame_remaining_subframes_ = 0;
       loop_frame_output_limit_ = 0;
-      return;
+      return 0;
     }
   }
 
@@ -453,12 +822,23 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* 
     }
   }
 
+  // The no-input path also goes through here. Do not drop samples that do not
+  // fit: keep them until the consumer frees space.
+  if (remaining_subframe_blocks_in_output_buffer_ < subframes_to_write ||
+      output_rb->write_count() < uint32_t(subframes_to_write) * kOutputBytesPerBlock) {
+    return 0;
+  }
+
   const int8_t raw_frame_read_offset =
       ((kBytesPerFrameChannel / kOutputBytesPerBlock) << data->is_stereo) -
       current_frame_remaining_subframes_;
 
-  output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
-                   subframes_to_write * kOutputBytesPerBlock);
+  const uint32_t written = static_cast<uint32_t>(output_rb->Write(
+      raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
+      subframes_to_write * kOutputBytesPerBlock));
+  // Diagnostic (audio_volcado_xma_s): the blocks as they reach the game's buffer.
+  VolcarXma(id(), 1, GetSampleRate(data->sample_rate), data->is_stereo ? 2 : 1,
+            raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset), written);
 
   const int8_t headroom = (current_frame_remaining_subframes_ - subframes_to_write == 0)
                               ? data->output_buffer_padding
@@ -466,6 +846,7 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* 
 
   remaining_subframe_blocks_in_output_buffer_ -= subframes_to_write + headroom;
   current_frame_remaining_subframes_ -= subframes_to_write;
+  return written;
 }
 
 int XmaContext::PrepareDecoder(int sample_rate, bool is_two_channel) {
@@ -572,6 +953,9 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   if (packet_index == -1) {
     REXAPU_ERROR("XmaContext {}: Invalid packet index. Input read offset: {}", id(),
                  static_cast<uint32_t>(data->input_buffer_read_offset));
+    // Work must publish the error and release the lock. Without this state, it
+    // repeated Decode forever with the same offset outside the input.
+    data->error_status = 4;
     return;
   }
 
@@ -588,12 +972,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
 
   // Full packet skip (0xFF) -- no new frames begin in this packet.
   if (skip_count == 0xFF) {
-    uint32_t next_input_offset =
-        GetNextPacketReadOffset(current_input_buffer, packet_index + 1, current_input_packet_count);
-    if (next_input_offset == kBitsPerPacketHeader) {
-      SwapInputBuffer(data);
-    }
-    data->input_buffer_read_offset = next_input_offset;
+    AdvanceInputPacket(data, packet_index + 1);
     return;
   }
 
@@ -605,6 +984,13 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   if (packet_info.current_frame_size_ == 0) {
     const uint8_t* next_packet = GetNextPacket(data, next_packet_index, current_input_packet_count);
     if (!next_packet) {
+      // A split header still belongs to the current buffer. Do not release it
+      // before the producer publishes its continuation in the other buffer.
+      if (kBitsPerPacket - relative_offset < kBitsPerFrameHeader &&
+          next_packet_index >= current_input_packet_count &&
+          !data->IsInputBufferValid(data->current_buffer ^ 1)) {
+        return;
+      }
       SwapInputBuffer(data);
       return;
     }
@@ -640,6 +1026,10 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
       const uint8_t* next_packet =
           GetNextPacket(data, next_packet_index, current_input_packet_count);
       if (!next_packet) {
+        if (next_packet_index >= current_input_packet_count &&
+            !data->IsInputBufferValid(data->current_buffer ^ 1)) {
+          return;
+        }
         data->error_status = 4;
         return;
       }
@@ -658,55 +1048,35 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   const uint32_t padding_start =
       static_cast<uint8_t>(stream.Copy(xma_frame_.data() + 1, packet_info.current_frame_size_));
 
-  decoded_frame_.fill(0);
+  raw_frame_.fill(0);
 
-  if (PrepareDecoder(data->sample_rate, bool(data->is_stereo)) == 1) {
-    // Reopening the codec restarts its output; the carried tail belongs to the
-    // old stream.
-    carry_valid_ = false;
+  if (PrepareDecoder(data->sample_rate, bool(data->is_stereo)) < 0) {
+    data->error_status = 4;
+    return;
   }
   PreparePacket(packet_info.current_frame_size_, padding_start);
   const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
   if (decoded) {
     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
-                 decoded_frame_.data());
+                 raw_frame_.data());
+    // Diagnostic (audio_volcado_xma_s): the whole frame as it comes out of FFmpeg.
+    VolcarXma(id(), 0, GetSampleRate(data->sample_rate), data->is_stereo ? 2 : 1, raw_frame_.data(),
+              size_t(kBytesPerFrameChannel) << data->is_stereo);
 
-    // Realign the decoder's output onto the bitstream's sample numbering: the
-    // samples of the frame just decoded run from kDecoderStartPadding into this
-    // block and finish in the head of the next one.
-    const size_t pad_bytes = kDecoderStartPadding * kBytesPerSample << data->is_stereo;
-    const size_t carry_bytes = (kBytesPerFrameChannel << data->is_stereo) - pad_bytes;
-
-    // Loop end: limit output to subframes 0..loop_subframe_end.
-    const uint8_t decoded_output_limit =
+    // NFSMW discards 384 samples at the start of each sound in sub_825E1CD0.
+    // Deliver the decoder's whole block: shifting it by 192 samples and holding
+    // its tail until the next frame also dropped a final block of 512. The
+    // consumer ran out of input and waited forever.
+    current_frame_remaining_subframes_ = 4 << data->is_stereo;
+    loop_frame_output_limit_ =
         is_loop_end_frame ? static_cast<uint8_t>((data->loop_subframe_end + 1) << data->is_stereo)
                           : 0;
-    // Loop start: skip leading subframes per loop_subframe_skip. skip == 4
-    // means the whole frame is a warm-up frame (frame-aligned loop start):
-    // decode seeds the codec state, output is fully discarded.
     const uint8_t decoded_start_skip =
         loop_start_skip_pending_ ? static_cast<uint8_t>(data->loop_subframe_skip << data->is_stereo)
                                  : 0;
     loop_start_skip_pending_ = false;
-
-    if (carry_valid_) {
-      std::memcpy(raw_frame_.data(), carry_frame_.data(), carry_bytes);
-      std::memcpy(raw_frame_.data() + carry_bytes, decoded_frame_.data(), pad_bytes);
-
-      current_frame_remaining_subframes_ = 4 << data->is_stereo;
-      loop_frame_output_limit_ = pending_output_limit_;
-      current_frame_remaining_subframes_ -=
-          std::min(pending_start_skip_, current_frame_remaining_subframes_);
-    }
-
-    std::memcpy(carry_frame_.data(), decoded_frame_.data() + pad_bytes, carry_bytes);
-    carry_valid_ = true;
-    pending_output_limit_ = decoded_output_limit;
-    pending_start_skip_ = decoded_start_skip;
-  } else {
-    // A dropped frame breaks the carry's adjacency; re-prime rather than splice
-    // two blocks that are not neighbors.
-    carry_valid_ = false;
+    current_frame_remaining_subframes_ -=
+        std::min(decoded_start_skip, current_frame_remaining_subframes_);
   }
 
   // Compute where to go next.
@@ -722,22 +1092,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     return;
   }
 
-  uint32_t next_input_offset =
-      GetNextPacketReadOffset(current_input_buffer, next_packet_index, current_input_packet_count);
-
-  if (next_input_offset == kBitsPerPacketHeader) {
-    SwapInputBuffer(data);
-    if (data->IsAnyInputBufferValid()) {
-      next_input_offset = xma::GetPacketFrameOffset(
-          memory()->TranslatePhysical(data->GetCurrentInputBufferAddress()));
-
-      if (next_input_offset > kMaxFrameSizeinBits) {
-        SwapInputBuffer(data);
-        return;
-      }
-    }
-  }
-  data->input_buffer_read_offset = next_input_offset;
+  AdvanceInputPacket(data, next_packet_index);
 }
 
 void XmaContext::ConvertFrame(const uint8_t** samples, bool is_two_channel,

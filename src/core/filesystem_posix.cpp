@@ -37,7 +37,7 @@
 
 // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
 // explicit *64 forms for legacy 32-bit off_t distributions.
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__SWITCH__)
 using rex_off64_t = off_t;
 #define rex_fseeko64 fseeko
 #define rex_ftello64 ftello
@@ -69,6 +69,13 @@ std::filesystem::path to_path(const std::u16string_view source) {
 
 namespace filesystem {
 
+#if defined(__SWITCH__)
+// libnx stores the arguments hbloader passes here. They are not declared in its
+// headers, but they are libnx.a symbols. C linkage: the namespace does not matter.
+extern "C" int __system_argc;
+extern "C" char** __system_argv;
+#endif
+
 std::filesystem::path GetExecutablePath() {
 #if defined(__APPLE__)
   // Darwin has no /proc; query the executable path via the dyld API. The first
@@ -91,6 +98,32 @@ std::filesystem::path GetExecutablePath() {
   std::error_code ec;
   std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
   return ec ? std::filesystem::path(executable_path) : canonical_path;
+#elif defined(__SWITCH__)
+  // Horizon has no /proc. The Linux branch would compile anyway and silently return
+  // empty. hbloader passes the NRO path as argv[0], for example
+  // sdmc:/switch/nfsmw/nfsmw.nro, and libnx stores it in __system_argv.
+  //
+  // It is returned without the "sdmc:". libstdc++ does not know newlib's devices:
+  // to it, "sdmc:/switch/nfsmw" has no root, so it is relative, and
+  // std::filesystem::absolute prepends the current directory. The result is
+  // "sdmc:/switch/nfsmw/sdmc:/switch/nfsmw/game_root", stat fails with an error
+  // other than "does not exist" and exists() throws filesystem_error. That is how
+  // NFSMW's first boot died, in Runtime::SetupVfs, with nothing in the log.
+  // "/switch/..." does have a root, and newlib resolves it on the default device,
+  // which is the SD. It is only stripped if that form can be queried.
+  if (__system_argc > 0 && __system_argv && __system_argv[0] && __system_argv[0][0]) {
+    std::string path = __system_argv[0];
+    constexpr std::string_view kSdmc = "sdmc:/";
+    if (std::string_view(path).starts_with(kSdmc)) {
+      std::string rooted = path.substr(kSdmc.size() - 1);
+      struct stat st;
+      if (stat(rooted.c_str(), &st) == 0) {
+        return std::filesystem::path(rooted);
+      }
+    }
+    return std::filesystem::path(path);
+  }
+  return {};
 #else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);
@@ -104,6 +137,14 @@ std::filesystem::path GetExecutableFolder() {
 }
 
 std::filesystem::path GetUserFolder() {
+#if defined(__SWITCH__)
+  // Horizon has no XDG_DATA_HOME, no HOME and no user database. The branch below
+  // would end up in pw->pw_dir with pw NULL and kill the process at startup:
+  // rex_app.cpp calls it to decide the data folder. On Switch the data goes next
+  // to the NRO, as in the portable PC version.
+  auto exe_dir = GetExecutableFolder();
+  return exe_dir.empty() ? std::filesystem::path("/switch") : exe_dir;
+#else
   // get preferred data home
   if (auto xdg = rex::platform::env::get("XDG_DATA_HOME")) {
     return std::filesystem::path(*xdg);
@@ -121,6 +162,7 @@ std::filesystem::path GetUserFolder() {
   getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
   assert(&pw1 == pw);  // sanity check
   return std::filesystem::path(pw->pw_dir) / ".local" / "share";
+#endif
 }
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {

@@ -32,6 +32,16 @@ class HostPathEntry : public Entry {
 
   const std::filesystem::path& host_path() const { return host_path_; }
 
+  /*
+   * "All the children of this directory are already known."
+   *
+   * HostPathDevice::Initialize walks the game's whole tree and creates an entry for every file. Once
+   * that has happened, GetChild failing is the final answer: the file does not exist. Without this flag
+   * the device went to the SD to check again (a stat and, if that failed, a full enumeration of the
+   * directory with one stat per entry), which cost ~32 ms per failed open. See host_path_device.cpp.
+   */
+  bool children_complete() const { return children_complete_; }
+
   X_STATUS Open(uint32_t desired_access, File** out_file) override;
   bool Truncate() override;
 
@@ -53,6 +63,7 @@ class HostPathEntry : public Entry {
   X_STATUS RenameEntryInternal(const std::vector<std::string_view>& path_parts) override;
 
   std::filesystem::path host_path_;
+  bool children_complete_ = false;
 };
 
 }  // namespace rex::filesystem

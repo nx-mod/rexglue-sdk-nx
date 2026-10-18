@@ -17,10 +17,14 @@
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/ui_event.h>
 #include <rex/ui/window.h>
+#if REX_PLATFORM_SWITCH
+#include <rex/ui/switch_imgui_input.h>
+#endif
 
 #include <imgui.h>
 
@@ -35,6 +39,22 @@ const char kProggyTinyCompressedDataBase85[10950 + 1] =
 static_assert(sizeof(ImmediateVertex) == sizeof(ImDrawVert), "Vertex types must match");
 
 namespace {
+
+// Scale of the menus. On the Switch the window is 1280x720 in handheld mode and 1920x1080 docked (and with
+// Reverse-NX's Fake Docked), with the medium DPI in both cases: at 1080p the menus had the same pixels and took
+// up a third less of the screen. Here they are always drawn on a logical canvas of 720 lines, which the immediate
+// drawer stretches to the window (the coordinate space of ImmediateDrawer::Begin, scissors included): they take up
+// the same part of the screen in both modes. The window DPI is left alone because the application uses it too
+// (rex_app.cpp: OnWindowResized and OnDpiScaleChanged).
+float FisicoALogico(const Window* window) {
+#if REX_PLATFORM_SWITCH
+  const uint32_t alto = window->GetActualPhysicalHeight();
+  if (alto) {
+    return 720.0f / float(alto);
+  }
+#endif
+  return float(window->GetMediumDpi()) / float(window->GetDpi());
+}
 
 void ApplyDefaultStyle(ImGuiStyle& style) {
   style.ScrollbarRounding = 0;
@@ -167,6 +187,12 @@ void ImGuiDrawer::Initialize() {
   // imgui assumes paths are char* so we can't throw a good path at it on
   // Windows.
   io.IniFilename = nullptr;
+
+#if REX_PLATFORM_SWITCH
+  // No mouse or keyboard: the menus are driven with the controller and the touch
+  // screen (switch_imgui_input.h).
+  nx::ConfigurarNavegacion(io);
+#endif
 
   // Setup the font glyphs.
   ImFontConfig font_config;
@@ -408,9 +434,24 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   }
   last_frame_time_ticks_ = current_frame_time_ticks;
 
-  float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  const float physical_to_logical = FisicoALogico(window_);
   io.DisplaySize.x = window_->GetActualPhysicalWidth() * physical_to_logical;
   io.DisplaySize.y = window_->GetActualPhysicalHeight() * physical_to_logical;
+
+#if REX_PLATFORM_SWITCH
+  {
+    // On Switch there is no mouse or keyboard and the window generates no input
+    // events: HID is read here, on the UI thread and before NewFrame. While a menu
+    // is open, Draw repeats continuously (see the end). There is a single
+    // ImGuiDrawer per process. The touch panel always measures 1280x720.
+    static nx::EstadoEntradaUi estado_entrada;
+    nx::EntradaUi entrada;
+    nx::LeerEntradaUi(entrada,
+                      float(window_->GetActualPhysicalWidth()) / 1280.0f * physical_to_logical,
+                      float(window_->GetActualPhysicalHeight()) / 720.0f * physical_to_logical);
+    nx::AplicarEntrada(io, entrada, estado_entrada);
+  }
+#endif
 
   ImGui::NewFrame();
 
@@ -642,7 +683,7 @@ void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
 
 void ImGuiDrawer::UpdateMousePosition(float x, float y) {
   auto& io = GetIO();
-  float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  const float physical_to_logical = FisicoALogico(window_);
   io.MousePos.x = x * physical_to_logical;
   io.MousePos.y = y * physical_to_logical;
 }

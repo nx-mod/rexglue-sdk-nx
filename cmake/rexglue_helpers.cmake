@@ -8,6 +8,17 @@
 #==========================================================
 include_guard(GLOBAL)
 
+# Library type of the guest DLL module targets (generated dll_targets.cmake). An NRO
+# cannot load shared libraries: on Switch each module is linked into the title instead
+# (rexglue_switch_link_module).
+if(NOT DEFINED REXGLUE_MODULE_LIBRARY_TYPE)
+    if(REXGLUE_PLATFORM_SWITCH)
+        set(REXGLUE_MODULE_LIBRARY_TYPE STATIC)
+    else()
+        set(REXGLUE_MODULE_LIBRARY_TYPE SHARED)
+    endif()
+endif()
+
 function(_rexglue_stage_macos_vulkan_runtime target_name)
     if(TARGET Vulkan::Loader AND TARGET MoltenVK::MoltenVK)
         set(_rexglue_vulkan_loader Vulkan::Loader)
@@ -60,6 +71,16 @@ function(rexglue_apply_target_settings target_name)
             target_compile_options(${target_name} PRIVATE -msse4.1)
         endif()
     endif()
+
+    # The PPC's floating point and memory rules, for the title's targets too: the add_compile_options in
+    # sdk/CMakeLists.txt only reach the SDK's own targets, so the generated game code and the guest DLLs were built
+    # without them. Without -ffp-contract=off GCC fuses separate PPC multiplies and adds into FMA and results drift
+    # from the Xbox 360; strict aliasing is unsafe for recompiled code. (fc3-nx found this, 2026-10-06.)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target_name} PRIVATE
+            -fno-strict-aliasing
+            $<IF:$<CXX_COMPILER_ID:GNU>,-ffp-contract=off,-ffp-model=strict>)
+    endif()
 endfunction()
 
 #==========================================================
@@ -76,6 +97,12 @@ endfunction()
 #==========================================================
 function(rexglue_configure_target target_name)
     cmake_parse_arguments(ARG "" "" "GPU_PLUGINS" ${ARGN})
+
+    if(REXGLUE_PLATFORM_SWITCH)
+        # Single static NRO: see cmake/rexglue_switch.cmake.
+        rexglue_switch_configure_target(${target_name} ${ARGN})
+        return()
+    endif()
 
     target_sources(${target_name} PRIVATE
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
@@ -182,6 +209,13 @@ endfunction()
 #==========================================================
 function(rexglue_configure_module_target target_name)
     cmake_parse_arguments(ARG "" "HOST" "" ${ARGN})
+
+    if(REXGLUE_PLATFORM_SWITCH)
+        # Linked into the NRO: see cmake/rexglue_switch.cmake.
+        rexglue_switch_link_module(${target_name} HOST ${ARG_HOST})
+        rexglue_apply_target_settings(${target_name})
+        return()
+    endif()
 
     if(ARG_HOST)
         set_target_properties(${target_name} PROPERTIES

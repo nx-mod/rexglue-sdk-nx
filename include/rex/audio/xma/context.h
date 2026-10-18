@@ -13,6 +13,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #include <rex/kernel.h>
@@ -114,14 +115,34 @@ struct XMA_CONTEXT_DATA {
   // DWORD 10-15
   uint32_t unk_dwords_10_15[6];  // reserved?
 
+  // The PPC thread polls the context while the XMA worker writes PCM.
+  // On ARM64, a plain load of the index does not acquire the samples it
+  // announces. Keep 32-bit words in BE and publish with release/acquire.
+  static uint32_t LoadWord(const void* ptr, size_t index) {
+    auto* words = const_cast<uint32_t*>(static_cast<const uint32_t*>(ptr));
+    return rex::byte_swap(std::atomic_ref<uint32_t>(words[index]).load(std::memory_order_acquire));
+  }
+
   explicit XMA_CONTEXT_DATA(const void* ptr) {
-    memory::copy_and_swap(reinterpret_cast<uint32_t*>(this), reinterpret_cast<const uint32_t*>(ptr),
-                          sizeof(XMA_CONTEXT_DATA) / 4);
+    auto* words = reinterpret_cast<uint32_t*>(this);
+    for (size_t i = 0; i < sizeof(XMA_CONTEXT_DATA) / 4; ++i) {
+      words[i] = LoadWord(ptr, i);
+    }
   }
 
   void Store(void* ptr) {
-    memory::copy_and_swap(reinterpret_cast<uint32_t*>(ptr), reinterpret_cast<const uint32_t*>(this),
-                          sizeof(XMA_CONTEXT_DATA) / 4);
+    static_assert(std::atomic_ref<uint32_t>::is_always_lock_free);
+    static_assert(std::atomic_ref<uint32_t>::required_alignment <= alignof(uint32_t));
+    auto* dest = static_cast<uint32_t*>(ptr);
+    const auto* words = reinterpret_cast<const uint32_t*>(this);
+    // Publish addresses and offsets before the valid bits and the write index.
+    // This is not an atomic snapshot of the 64 bytes: changing the configuration
+    // still requires disabling/locking the context.
+    for (size_t i = 2; i < sizeof(XMA_CONTEXT_DATA) / 4; ++i) {
+      std::atomic_ref<uint32_t>(dest[i]).store(rex::byte_swap(words[i]), std::memory_order_relaxed);
+    }
+    std::atomic_ref<uint32_t>(dest[1]).store(rex::byte_swap(words[1]), std::memory_order_release);
+    std::atomic_ref<uint32_t>(dest[0]).store(rex::byte_swap(words[0]), std::memory_order_release);
   }
 
   bool IsInputBufferValid(uint8_t buffer_index) const {
@@ -191,16 +212,6 @@ class XmaContext {
   static const uint32_t kOutputMaxSizeBytes = 31 * kOutputBytesPerBlock;
   static const uint32_t kMaxFrameSizeinBits = 0x4000 - kBitsPerPacketHeader;
 
-  // The bitstream declares a start padding that the hardware discards. FFmpeg's
-  // xmaframes decoder parses that field and drops it on the floor
-  // (wmaprodec.c decode_frame, "start skip"), emitting the padding as ordinary
-  // output, so its sample numbering runs this far ahead of the numbering the
-  // guest's loop offsets use. Measured at 192 on every wave checked. Left
-  // uncorrected it costs each loop wrap its final 192 samples.
-  static const uint32_t kDecoderStartPadding = 192;
-  static_assert(kDecoderStartPadding < kSamplesPerFrame,
-                "start padding must fit inside one decoded frame");
-
   explicit XmaContext();
   ~XmaContext();
 
@@ -249,9 +260,10 @@ class XmaContext {
   uint32_t GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_packet_index,
                                    uint32_t current_input_packet_count);
   uint8_t* GetCurrentInputBuffer(XMA_CONTEXT_DATA* data);
+  void AdvanceInputPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet_index);
 
   void Decode(XMA_CONTEXT_DATA* data);
-  void Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data);
+  uint32_t Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA* data);
   void UpdateLoopStatus(XMA_CONTEXT_DATA* data);
   void ClearLocked(XMA_CONTEXT_DATA* data);
   void ResetDecoderState();
@@ -272,6 +284,12 @@ class XmaContext {
   uint32_t id_ = 0;
   uint32_t guest_ptr_ = 0;
   std::mutex lock_;
+  // NFSMW: silence watchdog, measurement only (see AnotarProduccion in xma_context.cpp).
+  void AnotarProduccion(bool produjo, uint8_t motivo, const XMA_CONTEXT_DATA& data);
+  std::chrono::steady_clock::time_point silencio_desde_{};
+  bool en_silencio_ = false;
+  uint32_t silencio_pasadas_ = 0;
+  uint8_t silencio_motivo_ = 0;
   std::atomic<bool> is_allocated_ = false;
   std::atomic<bool> is_enabled_ = false;
 
@@ -287,10 +305,6 @@ class XmaContext {
   std::array<uint8_t, 1 + 4096> xma_frame_;
   // Conversion buffer for up to 2-channel frame
   std::array<uint8_t, kBytesPerFrameChannel * 2> raw_frame_;
-  // Freshly decoded block, before start-padding realignment
-  std::array<uint8_t, kBytesPerFrameChannel * 2> decoded_frame_;
-  // Tail of the previous decoded block, awaiting the next block's padding head
-  std::array<uint8_t, kBytesPerFrameChannel * 2> carry_frame_;
 
   // Output buffer tracking
   int32_t remaining_subframe_blocks_in_output_buffer_ = 0;
@@ -300,12 +314,6 @@ class XmaContext {
   uint8_t loop_frame_output_limit_ = 0;
   bool loop_start_skip_pending_ = false;
 
-  // Start-padding realignment state. Attributes belong to the frame whose
-  // samples are still being assembled, so they land one decode after the frame
-  // they describe.
-  bool carry_valid_ = false;
-  uint8_t pending_output_limit_ = 0;
-  uint8_t pending_start_skip_ = 0;
 };
 
 }  // namespace rex::audio

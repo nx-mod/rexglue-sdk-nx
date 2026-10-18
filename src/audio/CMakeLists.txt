@@ -11,11 +11,15 @@ add_library(rexaudio OBJECT
     xma_register_file.cpp
     # NOP backend (always available)
     nop/nop_audio_system.cpp
-    # SDL backend
-    sdl/sdl_audio_system.cpp
-    sdl/sdl_audio_driver.cpp
 )
 add_library(rex::audio ALIAS rexaudio)
+if(REXGLUE_PLATFORM_SWITCH)
+    # libnx audout backend
+    target_sources(rexaudio PRIVATE switch/switch_audio_system.cpp)
+else()
+    # SDL backend
+    target_sources(rexaudio PRIVATE sdl/sdl_audio_system.cpp sdl/sdl_audio_driver.cpp)
+endif()
 
 rex_target_pch(rexaudio
     <mutex>
@@ -36,6 +40,9 @@ target_include_directories(rexaudio PUBLIC
 )
 
 target_link_libraries(rexaudio
-    PUBLIC rexcore SDL3::SDL3
+    PUBLIC rexcore
     PRIVATE libavcodec libavutil
 )
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    target_link_libraries(rexaudio PUBLIC SDL3::SDL3)
+endif()

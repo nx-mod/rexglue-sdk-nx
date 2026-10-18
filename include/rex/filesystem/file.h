@@ -57,6 +57,10 @@ class File {
     return X_STATUS_NOT_IMPLEMENTED;
   }
 
+  // Flush anything pending to disk. Devices that cannot do it (or for which it makes no sense, such as
+  // read-only ones) just report success; the one that matters is the host disk device.
+  virtual X_STATUS Flush() { return X_STATUS_SUCCESS; }
+
   // rex::filesystem::FileAccess
   uint32_t file_access() const { return file_access_; }
   const Entry* entry() const { return entry_; }

@@ -30,7 +30,13 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #include <fcntl.h>
 #endif
+#if defined(__SWITCH__)
+// Horizon has no sys/syscall.h. The shim provides affinity, priority, cpu_set_t
+// and the thread id. See core/threading_switch.h.
+#include "threading_switch.h"
+#else
 #include <sys/syscall.h>
+#endif
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -115,7 +121,7 @@ enum class SignalType {
 };
 
 int GetSystemSignal(SignalType num) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__SWITCH__)
   // macOS has no realtime signals (SIGRTMIN..SIGRTMAX); map the runtime's
   // signals onto the two user-defined signals.
   switch (num) {
@@ -135,7 +141,7 @@ int GetSystemSignal(SignalType num) {
 }
 
 SignalType GetSystemSignalType(int num) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__SWITCH__)
   switch (num) {
     case SIGUSR1:
       return SignalType::kThreadSuspend;
@@ -156,6 +162,15 @@ std::array<std::atomic<bool>, static_cast<size_t>(SignalType::k_Count)> signal_h
 static void signal_handler(int signal, siginfo_t* info, void* context);
 
 void install_signal_handler(SignalType type) {
+#if defined(__SWITCH__)
+  // Horizon does not deliver signals to user processes. Installing the handler
+  // would not fail, it would simply never be called, and that is worse than not
+  // doing it: it would suggest that signal-based suspension works.
+  //
+  // Real suspension goes through svcSetThreadActivity, in Suspend()/Resume().
+  // See core/threading_switch.h.
+  (void)type;
+#else
   bool expected = false;
   if (!signal_handler_installed[static_cast<size_t>(type)].compare_exchange_strong(expected,
                                                                                    true)) {
@@ -168,6 +183,7 @@ void install_signal_handler(SignalType type) {
   if (sigaction(GetSystemSignal(type), &action, nullptr) != 0) {
     signal_handler_installed[static_cast<size_t>(type)] = false;
   }
+#endif
 }
 
 // TODO(dougvj)
@@ -178,6 +194,8 @@ void EnableAffinityConfiguration() {}
 uint32_t current_thread_system_id() {
 #if defined(__APPLE__)
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#elif defined(__SWITCH__)
+  return RexSwitchCurrentThreadId();
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
@@ -290,7 +308,27 @@ class PosixConditionBase {
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
     auto predicate = [this] { return this->signaled(); };
-#if REX_PLATFORM_LINUX
+#if defined(__SWITCH__)
+    // The timeout includes acquiring the internal lock. lock() ignored it, and a
+    // zero-timeout query could block behind another thread indefinitely.
+    const auto deadline = timeout == std::chrono::milliseconds::max()
+                              ? std::chrono::steady_clock::time_point::max()
+                              : std::chrono::steady_clock::now() + timeout;
+    std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+    if (timeout == std::chrono::milliseconds::max()) {
+      lock.lock();
+    } else {
+      while (!lock.try_lock()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+          return WaitResult::kTimeout;
+        }
+        // Dormir permite avanzar al propietario aunque tenga menor prioridad.
+        const auto remaining = std::chrono::ceil<std::chrono::microseconds>(deadline - now);
+        std::this_thread::sleep_for(std::min(remaining, std::chrono::microseconds(100)));
+      }
+    }
+#elif REX_PLATFORM_LINUX
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
     int lock_result = pthread_mutex_lock(native_mutex);
     if (lock_result == EOWNERDEAD) {
@@ -309,7 +347,12 @@ class PosixConditionBase {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
       } else {
+#if defined(__SWITCH__)
+        // Do not start another full timeout after acquiring the lock.
+        executed = cond_.wait_until(lock, deadline, predicate);
+#else
         executed = cond_.wait_for(lock, timeout, predicate);
+#endif
       }
     }
     if (executed) {
@@ -335,13 +378,13 @@ class PosixConditionBase {
                         ? std::chrono::steady_clock::time_point::max()
                         : start_time + timeout;
 
+    // Reuse the allocation between polls; clear() releases the locks, not the memory.
+    std::vector<std::unique_lock<std::mutex>> locks;
+    locks.reserve(handles.size());
     while (true) {
       size_t first_signaled = std::numeric_limits<size_t>::max();
       bool condition_met = false;
       bool all_locked = true;
-
-      std::vector<std::unique_lock<std::mutex>> locks;
-      locks.reserve(handles.size());
 
       for (size_t i = 0; i < handles.size(); ++i) {
 #if REX_PLATFORM_LINUX
@@ -367,7 +410,25 @@ class PosixConditionBase {
 
       if (!all_locked) {
         locks.clear();
+        // The timeout also expires when an object cannot be inspected.
+        // The earlier continue skipped the only timeout check.
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= end_time) {
+          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+        }
+#if defined(__SWITCH__)
+        // On Horizon yielding is useless against a lower-priority thread:
+        // svcSleepThread(0) only yields to threads of the same priority. If the
+        // lock holder has lower priority and is on this core, it would never get
+        // to release the lock. A real sleep is needed.
+        const auto pause = timeout == std::chrono::milliseconds::max()
+                               ? std::chrono::microseconds(100)
+                               : std::min(std::chrono::ceil<std::chrono::microseconds>(end_time - now),
+                                          std::chrono::microseconds(100));
+        std::this_thread::sleep_for(pause);
+#else
         std::this_thread::yield();
+#endif
         continue;
       }
 
@@ -414,8 +475,12 @@ class PosixConditionBase {
       if (timeout == std::chrono::milliseconds::max()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+        // In microseconds. In milliseconds, the remainder of a short wait was
+        // truncated to 0 and sleep_for(0) does not sleep: the alertable wait asks
+        // for 1 ms slices, so WaitAny spun for its whole timeout. On Switch the
+        // audio thread (0x2B) ate a whole core this way.
+        auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(end_time - now);
+        auto sleep_time = std::min(remaining, std::chrono::microseconds(1000));
         std::this_thread::sleep_for(sleep_time);
       }
     }
@@ -758,6 +823,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
 #if defined(__APPLE__)
   uint32_t system_id() const { return static_cast<uint32_t>(pthread_mach_thread_np(thread_)); }
+#elif defined(__SWITCH__)
+  // pthread_t is a pointer in newlib, not an integer: it has to be reinterpreted.
+  uint32_t system_id() const {
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(thread_));
+  }
 #else
   uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
 #endif
@@ -868,7 +938,17 @@ class PosixCondition<Thread> : public PosixConditionBase {
       return;
     }
 
-#if defined(__APPLE__)
+#if defined(__SWITCH__)
+    // Horizon does not deliver signals, so there is no way to interrupt another
+    // thread to make it run the call. The callback is queued and runs when the
+    // target thread passes an alertable point (DispatchCurrentThreadUserCallback),
+    // which is where the SDK already drains them.
+    //
+    // A real difference in behavior: on the PC the callback arrives right away;
+    // here it arrives when the thread gets to it. That is enough for guest APCs,
+    // which is what the SDK uses this for.
+    int result = 0;
+#elif defined(__APPLE__)
     // macOS has no sigqueue/pthread_sigqueue; pthread_kill delivers the signal
     // without the sigval payload.
     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
@@ -924,6 +1004,15 @@ class PosixCondition<Thread> : public PosixConditionBase {
     --suspend_count_;
     if (suspend_count_ == 0 && state_ == State::kSuspended) {
       state_ = State::kRunning;
+#if defined(__SWITCH__)
+      // Counterpart of RexSwitchPauseThread in Suspend(). The semaphore below
+      // wakes a thread that suspended itself from WaitSuspended(); this call
+      // resumes a thread that was paused from outside. Both are needed,
+      // because they are two different suspension paths.
+      if (!pthread_equal(thread_, pthread_self())) {
+        RexSwitchResumeThread(thread_);
+      }
+#endif
       // Async-signal-safe wakeup for WaitSuspended() from signal handler path.
       sem_post(suspend_sem_ptr());
     }
@@ -951,8 +1040,21 @@ class PosixCondition<Thread> : public PosixConditionBase {
       return true;
     }
 
+#if defined(__SWITCH__)
+    // Careful: pthread_kill does not work here.
+    //
+    // On Horizon newlib accepts the call and returns 0, but the signal is never
+    // delivered. The result would be the worst possible: the state would say
+    // kSuspended, the function would return true, and the thread would keep
+    // running happily. A bug that compiles, gives no warning and shows up later
+    // as random corruption.
+    //
+    // svcSetThreadActivity is the system's real mechanism.
+    return RexSwitchPauseThread(thread_) == 0;
+#else
     int result = pthread_kill(thread_, GetSystemSignal(SignalType::kThreadSuspend));
     return result == 0;
+#endif
   }
 
   void Terminate(int exit_code) {
@@ -1106,7 +1208,9 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   if (deadline == std::chrono::steady_clock::time_point::max()) {
     return kAlertablePollSlice;
   }
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+  // A positive remainder under 1 ms must keep waiting. Truncating it to zero
+  // turns the end of every alertable wait into a busy poll on Horizon.
+  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
       deadline - std::chrono::steady_clock::now());
   if (remaining <= std::chrono::milliseconds::zero()) {
     return std::chrono::milliseconds::zero();
@@ -1170,12 +1274,13 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
     if (DispatchCurrentThreadUserCallback()) {
       return WaitResult::kUserCallback;
     }
-    if (HasAlertableTimeoutElapsed(deadline)) {
-      return WaitResult::kTimeout;
-    }
     auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline));
     if (result != WaitResult::kTimeout) {
       return result;
+    }
+    // Even with a zero timeout the signaled object has to be checked once.
+    if (HasAlertableTimeoutElapsed(deadline)) {
+      return WaitResult::kTimeout;
     }
   }
 }
@@ -1202,12 +1307,12 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
     if (DispatchCurrentThreadUserCallback()) {
       return WaitResult::kUserCallback;
     }
-    if (HasAlertableTimeoutElapsed(deadline)) {
-      return WaitResult::kTimeout;
-    }
     result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline));
     if (result != WaitResult::kTimeout) {
       return result;
+    }
+    if (HasAlertableTimeoutElapsed(deadline)) {
+      return WaitResult::kTimeout;
     }
   }
 }
@@ -1234,13 +1339,13 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
     if (DispatchCurrentThreadUserCallback()) {
       return std::make_pair(WaitResult::kUserCallback, 0);
     }
-    if (HasAlertableTimeoutElapsed(deadline)) {
-      return std::make_pair(WaitResult::kTimeout, 0);
-    }
     auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
                                                    wait_all, ComputeAlertableWaitTimeout(deadline));
     if (result.first != WaitResult::kTimeout) {
       return result;
+    }
+    if (HasAlertableTimeoutElapsed(deadline)) {
+      return std::make_pair(WaitResult::kTimeout, 0);
     }
   }
 }

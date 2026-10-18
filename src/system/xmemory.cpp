@@ -157,6 +157,17 @@ bool Memory::Initialize() {
     return false;
   }
   mapping_base_ = views_.all_views[0];
+#elif REX_PLATFORM_SWITCH
+  // Horizon does not allow fixed addresses: the kernel chooses the guest window,
+  // which CreateFileMappingHandle reserved. We ask where it ended up and carve the
+  // views inside it, like macOS but without mmap. Trying 1<<32, 1<<33... as Linux
+  // does would always fail.
+  mapping_base_ = static_cast<uint8_t*>(rex::memory::GetFileMappingBase(mapping_));
+  if (!mapping_base_ || MapViews(mapping_base_)) {
+    REXSYS_ERROR("Unable to map the guest views into the Switch guest window.");
+    assert_always();
+    return false;
+  }
 #else
   // Attempt to create our views. This may fail at the first address
   // we pick, so try a few times.
@@ -218,9 +229,22 @@ bool Memory::Initialize() {
 
   // Pre-commit the physical memory range so the GPU can access it
   // without page faults. Reference: xenia-canary 5f5be0668.
+#if REX_PLATFORM_SWITCH
+  // Not on Switch. It is 512 MB, and on Horizon each chunk is also mapped into the
+  // five views the 360 has over physical memory (0x7F..., 0xA0..., 0xC0...,
+  // 0xE0... and raw physical), so the process ends up accounting for more than
+  // 2 GB and the kernel refuses the next allocation. Measured: the game stayed
+  // black after the EA logo with "no se pudo confirmar 0x6A0000 bytes; respaldo
+  // 578 MB, mapeado 2139 MB contando espejos" (2001-0103).
+  //
+  // Instead, physical memory is committed as it is touched: the first access to an
+  // uncommitted page lands in the exception handler, which commits 1 MB and
+  // retries the instruction (exception_handler_switch.cpp, step 0).
+#else
   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
+#endif
 
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
@@ -882,6 +906,29 @@ rex::memory::PageAccess ToPageAccess(uint32_t protect) {
   }
 }
 
+// Switch: outside physical memory, what the guest requests as read-only is
+// given on the host as read-write. On Horizon there are no read-only pages in
+// the guest window: they are unmapped, and every read goes through the
+// exception handler (2 us per access). The XEX constants live in such pages,
+// and the game code reads them constantly. On the first boot of NFSMW one of
+// those emulated reads was also what exposed the resume bug (see
+// resume_ctx.h). The game does not write to those pages (it would fault on the
+// 360 and on the PC), so dropping the protection does not change its behavior.
+// Physical memory stays as it is: there, read-only is the GPU's write watching,
+// and it has to fault.
+static rex::memory::PageAccess ToHostPageAccess(uint32_t protect, memory::HeapType heap_type) {
+  const rex::memory::PageAccess access = ToPageAccess(protect);
+#if REX_PLATFORM_SWITCH
+  if (access == rex::memory::PageAccess::kReadOnly &&
+      heap_type != memory::HeapType::kGuestPhysical) {
+    return rex::memory::PageAccess::kReadWrite;
+  }
+#else
+  (void)heap_type;
+#endif
+  return access;
+}
+
 uint32_t FromPageAccess(rex::memory::PageAccess protect) {
   switch (protect) {
     case memory::PageAccess::kNoAccess:
@@ -952,7 +999,8 @@ bool BaseHeap::SyncHostPageAccess(uint32_t start_page_number, uint32_t end_page_
         continue;
       }
       has_committed = true;
-      const rex::memory::PageAccess page_access = ToPageAccess(page_entry.current_protect);
+      const rex::memory::PageAccess page_access =
+          ToHostPageAccess(page_entry.current_protect, heap_type_);
       if (page_access == rex::memory::PageAccess::kReadWrite) {
         has_read = true;
         has_write = true;
@@ -1349,7 +1397,8 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
                           : rex::memory::AllocationType::kReserve;
     void* result =
         rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
-                                page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+                                page_count << page_size_shift_, alloc_type,
+                                ToHostPageAccess(protect, heap_type_));
     if (!result) {
       REXSYS_ERROR("BaseHeap::AllocFixed failed to alloc range from host");
       return false;
@@ -1512,7 +1561,8 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
                           : rex::memory::AllocationType::kReserve;
     void* result =
         rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
-                                page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+                                page_count << page_size_shift_, alloc_type,
+                                ToHostPageAccess(protect, heap_type_));
     if (!result) {
       REXSYS_ERROR("BaseHeap::Alloc failed to alloc range from host");
       return false;
@@ -1704,14 +1754,19 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32
     const uint32_t page_count = end_page_number - start_page_number + 1;
     memory::PageAccess old_protect_access;
     if (!rex::memory::Protect(TranslateRelative(start_page_number << page_size_shift_),
-                              page_count << page_size_shift_, ToPageAccess(protect),
+                              page_count << page_size_shift_, ToHostPageAccess(protect, heap_type_),
                               old_protect ? &old_protect_access : nullptr)) {
       REXSYS_ERROR("BaseHeap::Protect failed due to host VirtualProtect failure");
       return false;
     }
 
     if (old_protect) {
+#if REX_PLATFORM_SWITCH
+      // The host permission is no longer the guest's (ToHostPageAccess).
+      *old_protect = page_table_[start_page_number].current_protect;
+#else
       *old_protect = FromPageAccess(old_protect_access);
+#endif
     }
   } else {
     if (old_protect) {

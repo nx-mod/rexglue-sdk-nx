@@ -26,7 +26,11 @@
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/audio/audio_system.h>
+#if REX_PLATFORM_SWITCH
+#include <rex/audio/switch/switch_audio_system.h>
+#else
 #include <rex/audio/sdl/sdl_audio_system.h>
+#endif
 #include <rex/input/input_system.h>
 #include <rex/kernel/init.h>
 #include <rex/string/numeric.h>
@@ -38,6 +42,18 @@
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/keybinds.h>
 #include <rex/version.h>
+
+#if REX_PLATFORM_SWITCH
+#include <cstdio>
+#include <rex/ui/switch_imgui_input.h>
+// Only the syscall header: switch.h drags typedefs that collide with rex.
+extern "C" {
+#include <switch/types.h>
+// libnx runtime internals used by the Switch exit in OnClosing.
+extern u32 __nx_applet_exit_mode;
+NX_NORETURN void __libnx_exit(int rc);
+}
+#endif
 
 #include <fmt/format.h>
 #include <imgui.h>
@@ -254,7 +270,13 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
       input_sys->SetActiveCallback([this]() {
         if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_)
           return true;
+#if REX_PLATFORM_SWITCH
+        // The menu and the game share the controller: while a menu window
+        // has navigation focus, the buttons belong to the menu.
+        return rex::ui::nx::JuegoRecibeMando(imgui_drawer_->GetIO());
+#else
         return !imgui_drawer_->GetIO().WantCaptureMouse;
+#endif
       });
     }
   }
@@ -307,7 +329,11 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
 
 bool ReXApp::SetupPresentation() {
   config_.gpu_plugin = REXCVAR_GET(gpu_plugin);
+#if REX_PLATFORM_SWITCH
+  config_.audio_factory = REX_AUDIO_BACKEND(rex::audio::nx::SwitchAudioSystem);
+#else
   config_.audio_factory = REX_AUDIO_BACKEND(rex::audio::sdl::SDLAudioSystem);
+#endif
   config_.input_factory = REX_INPUT_BACKEND(rex::input::CreateDefaultInputSystem);
   config_.kernel_init = rex::kernel::InitializeKernel;
 
@@ -400,6 +426,10 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
     } else {
       debug_overlay_ =
           std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+#if REX_PLATFORM_SWITCH
+      // The position set with L+R and the right stick, stored next to the configuration file.
+      debug_overlay_->SetPositionFile(config_path_.parent_path() / "overlay_depuracion.txt");
+#endif
     }
   });
   rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
@@ -432,18 +462,32 @@ void ReXApp::LaunchModule() {
     // Register the achievement notification callback now that the runtime and
     // KernelState are guaranteed to exist. Done here (not OnCreateDialogs)
     // because KernelState is null during SetupPresentation.
-    if (!achievement_notification_) {
-      achievement_notification_ =
-          std::shared_ptr<ui::AchievementNotificationDialog>(CreateAchievementNotificationDialog());
-    }
-    if (achievement_notification_ && achievement_notification_listener_ == 0 && runtime_ &&
-        runtime_->kernel_state()) {
-      std::weak_ptr<ui::AchievementNotificationDialog> notification = achievement_notification_;
+    /*
+     * The achievements notification is created when needed, not at startup.
+     *
+     * An ImGuiDialog registers itself in the ImGuiDrawer in its constructor and stays there for its
+     * whole life. And as soon as the Presenter sees one UI drawer registered, it stops presenting from
+     * the game thread and asks the UI thread to paint, which coalesces the requests: the mailbox ends
+     * up discarding half of the frames with their GPU work already done.
+     *
+     * Measured on the console: this dialog (which draws nothing until an achievement pops) was created
+     * 0.7 s after startup and dragged presentation down from ~18 to ~9 images per second for the whole
+     * session. By creating it only when the first event arrives, the game presents every frame it
+     * renders.
+     */
+    if (achievement_notification_listener_ == 0 && runtime_ && runtime_->kernel_state()) {
       achievement_notification_listener_ = achievements().RegisterNotificationCallback(
-          [notification](const rex::system::AchievementEvent& event) {
-            if (auto dialog = notification.lock()) {
-              dialog->Push(event);
-            }
+          [this](const rex::system::AchievementEvent& event) {
+            rex::system::AchievementEvent copia = event;
+            app_context().CallInUIThreadDeferred([this, copia]() {
+              if (!achievement_notification_) {
+                achievement_notification_ = std::shared_ptr<ui::AchievementNotificationDialog>(
+                    CreateAchievementNotificationDialog());
+              }
+              if (achievement_notification_) {
+                achievement_notification_->Push(copia);
+              }
+            });
           });
     }
 
@@ -508,7 +552,19 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   // reclaims the rest.
   REXLOG_INFO("Title terminated; hard-exiting process.");
   rex::FlushLogging();
+#if REX_PLATFORM_SWITCH
+  // std::_Exit returns the NRO to hbloader with every guest, GPU and audio
+  // thread still alive, and hbmenu then crashes on heap pages those threads'
+  // stacks keep aliased. The process must end, and an application has to ask
+  // the system for it (svcExitProcess is reported as "closed because an error
+  // occurred"): with __nx_applet_exit_mode = 1, libnx closes the services and
+  // sends ISelfController::Exit. See windowed_app_main_switch.cpp.
+  std::fflush(nullptr);
+  __nx_applet_exit_mode = 1;
+  __libnx_exit(0);
+#else
   std::_Exit(0);
+#endif
 }
 
 bool ReXApp::OnCloseRequested(ui::UIEvent& e) {

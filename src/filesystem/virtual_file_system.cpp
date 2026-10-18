@@ -234,8 +234,16 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
       return X_STATUS_FILE_IS_A_DIRECTORY;
     }
 
-    // If the cached entry does not exist on host anymore, invalidate it.
-    if (parent_entry) {
+    /*
+     * If the cached entry does not exist on host anymore, invalidate it.
+     *
+     * Only on writable devices. This was a stat to the SD on every successful open, and on a
+     * read-only device (the game data) it can never say no: the file was there at mount time and
+     * nobody deletes it during play. On writable devices (saves and profiles) it is needed, because
+     * the game itself deletes and recreates files and the in-memory entry goes stale; that case is
+     * unchanged.
+     */
+    if (parent_entry && !parent_entry->is_read_only()) {
       const auto* host_path_entry = dynamic_cast<const HostPathEntry*>(parent_entry);
       if (host_path_entry) {
         const auto file_path = host_path_entry->host_path() / rex::to_path(entry->name());

@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 
@@ -19,15 +20,27 @@
 #include <rex/input/input_system.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/input/nop/nop_input_driver.h>
+#if REX_PLATFORM_SWITCH
+#include <rex/input/switch/switch_input_driver.h>
+#else
 #include <rex/input/sdl/sdl_input_driver.h>
+#endif
 #include <rex/input/state_merge.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
 
+#if REX_PLATFORM_SWITCH
+REXCVAR_DEFINE_STRING(input_backend, "switch", "Input", "Input backend: switch")
+    .allowed({"switch"});
+#else
 REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
+#endif
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+REXCVAR_DEFINE_BOOL(input_vibracion, false, "Input",
+                    "Vibracion del mando (desactivada por defecto: a los mandos solo llega "
+                    "vibracion cero). true = la vibracion del juego");
 namespace rex::input {
 
 namespace {
@@ -79,6 +92,25 @@ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignme
 }
 
 void InputSystem::RefreshDevices() {
+  /*
+   * At most one enumeration every 50 ms.
+   *
+   * Stack sampling found the thread that prepares each game frame spending 5.8 % of its time
+   * inside SetState (vibration), and every game call to the controller went through here:
+   * three new vectors and a query to each driver, several times per frame. A controller is not
+   * connected or disconnected 30 times per second; with 50 ms a new controller shows up before
+   * anyone notices. The first call always enumerates.
+   */
+  {
+    const int64_t ahora = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    const int64_t ultimo = ultimo_refresco_ns_.load(std::memory_order_relaxed);
+    if (ultimo != 0 && !devices_.empty() && ahora - ultimo < 50000000) {
+      return;
+    }
+    ultimo_refresco_ns_.store(ahora, std::memory_order_relaxed);
+  }
   std::vector<DeviceInfo> seen;
   std::vector<InputDriver*> owners;
   std::vector<DeviceInfo> enumerated;
@@ -268,6 +300,12 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
   bool any_synthetic = false;
   bool pad_rumbled = false;
   X_RESULT pad_error = X_ERROR_DEVICE_NOT_CONNECTED;
+  // input_vibracion = false: the game still sees its call serviced, but the controllers only
+  // receive zero vibration.
+  X_INPUT_VIBRATION sin_vibracion{};
+  if (!REXCVAR_GET(input_vibracion)) {
+    vibration = &sin_vibracion;
+  }
   for (DeviceId id : ids) {
     auto* driver = DriverForDevice(id);
     const DeviceInfo* info = DeviceInfoFor(id);
@@ -334,12 +372,21 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
     }
 #endif
 
+#if REX_PLATFORM_SWITCH
+    if (REXCVAR_GET(input_backend) == "switch") {
+      auto switch_driver = std::make_unique<nx::SwitchInputDriver>(nullptr, 0);
+      if (switch_driver->Setup() == X_STATUS_SUCCESS) {
+        input->AddDriver(std::move(switch_driver));
+      }
+    }
+#else
     if (REXCVAR_GET(input_backend) == "sdl") {
       auto sdl_driver = std::make_unique<sdl::SDLInputDriver>(nullptr, 0);
       if (sdl_driver->Setup() == X_STATUS_SUCCESS) {
         input->AddDriver(std::move(sdl_driver));
       }
     }
+#endif
 
     // MnK driver (keyboard/mouse -> controller emulation)
     auto mnk_driver = std::make_unique<mnk::MnkInputDriver>(nullptr, 0);

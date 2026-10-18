@@ -162,6 +162,10 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
     fn();
   } else {
     pending_fns_.push(std::move(fn));
+#if REX_PLATFORM_SWITCH
+    // Also wake up for internal work, even if the ring does not change.
+    write_ptr_index_event_->Set();
+#endif
   }
 }
 
@@ -217,8 +221,15 @@ void CommandProcessor::WorkerThreadMain() {
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
       PrepareForWait();
+#if !REX_PLATFORM_SWITCH
       uint32_t loop_count = 0;
+#endif
       do {
+#if REX_PLATFORM_SWITCH
+        // UpdateWritePointer and CallInThread signal the event. Leave the CPU free
+        // for the guest from the first attempt, without 501 polls beforehand.
+        rex::thread::Wait(write_ptr_index_event_.get(), true, std::chrono::milliseconds(5));
+#else
         // If we spin around too much, revert to a "low-power" state.
         if (loop_count > 500) {
           const int wait_time_ms = 5;
@@ -228,6 +239,7 @@ void CommandProcessor::WorkerThreadMain() {
 
         rex::thread::MaybeYield();
         loop_count++;
+#endif
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
@@ -619,12 +631,60 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
   reader.set_read_offset(read_index * sizeof(uint32_t));
   reader.set_write_offset(write_index * sizeof(uint32_t));
+
+  /*
+   * Publish the read pointer while executing, not only at the end
+   *
+   * The read pointer used to be written once, after draining the whole batch.
+   * And the game watches it in a tight loop to know how much room it has left in
+   * the ring: measured on the console, the guest main thread spent 70% of its
+   * time spinning in sub_82597690 and sub_825A5D18, which are exactly that, two
+   * waits on this word.
+   *
+   * The result was that the two threads took turns instead of overlapping: the
+   * guest filled the ring and stopped, we drained it, and so on. That is why
+   * total CPU stayed at 185% of 400% with the main thread at 95% and the GPU
+   * thread at 49%: neither could make progress while the other was working.
+   *
+   * Real hardware does not do that: it releases the pointer as it consumes, and
+   * how often is set by the game itself in CP_RB_CNTL (RB_BLKSZ). That value was
+   * already stored in read_ptr_update_freq_ by EnableReadPointerWriteBack, but
+   * it was not used anywhere: the TODO below had been there from the start. It
+   * is used now.
+   *
+   * Publishing too often is safe: no handler keeps a pointer into the ring for
+   * later. The only one that might seem to, the one that loads shader
+   * microcode, copies it to a std::vector before returning.
+   */
+  const uint32_t palabras_anillo = primary_buffer_size_ / uint32_t(sizeof(uint32_t));
+  /*
+   * A small floor so as not to write after every packet: the guest is spinning
+   * on that same word from another core, and every write invalidates its cache
+   * line. With 0x20 words it is published about fifty times more often than
+   * writing it only at the end of the batch, which is plenty.
+   */
+  const uint32_t paso = read_ptr_update_freq_ ? (read_ptr_update_freq_ < 0x20u ? 0x20u
+                                                                              : read_ptr_update_freq_)
+                                              : 0x100u;
+  uint32_t publicado = read_index;
+
   do {
     if (!ExecutePacket(&reader)) {
       // This probably should be fatal - but we're going to continue anyways.
       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
       assert_always();
       break;
+    }
+
+    if (read_ptr_writeback_ptr_) {
+      const uint32_t ahora = uint32_t(reader.read_offset() / sizeof(uint32_t));
+      // The ring wraps around, so the subtraction is masked with the size.
+      const uint32_t avanzado = (ahora - publicado) & (palabras_anillo - 1);
+      if (avanzado >= paso) {
+        memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+                                         ahora);
+        publicado = ahora;
+      }
     }
   } while (reader.read_count());
 

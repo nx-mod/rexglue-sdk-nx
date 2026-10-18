@@ -37,6 +37,12 @@
 #include <rex/thread.h>
 #include <rex/vec128.h>
 
+#if REX_PLATFORM_SWITCH
+#include <string_view>
+
+#include "../core/threading_switch.h"
+#endif
+
 REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
                     "Ignores game-specified thread priorities");
 
@@ -326,6 +332,34 @@ void XThread::FreeStack() {
   }
 }
 
+#if REX_PLATFORM_SWITCH
+namespace {
+
+// Horizon only time-slices threads at the preemption priority, 0x3B; every
+// other priority is cooperative, and a thread that never blocks keeps its core
+// from every other thread of the same or lower priority. Recompiled guest code
+// spin-waits constantly, so guest threads run at 0x3B and host service threads
+// above it (a lower number), able to preempt the spinners: audio first, then
+// the GPU and the kernel's own workers. This is the scheme MarathonRecomp-NX
+// ships with. Host threads are told apart by the name their owner gives them
+// before Create().
+int SwitchPriorityFor(bool guest_thread, std::string_view name) {
+  if (guest_thread) {
+    return REX_SWITCH_PRIO_GUEST;
+  }
+  // set_name() stores the name with the handle appended ("Audio Worker (F8000014)"),
+  // so the prefix is compared. With an exact comparison the Audio Worker and the
+  // XMA Decoder stayed at the presentation priority (0x2C) instead of the audio one
+  // (0x2B), as rex_perfil.log showed on the console.
+  if (name.starts_with("Audio Worker") || name.starts_with("XMA Decoder")) {
+    return REX_SWITCH_PRIO_AUDIO;
+  }
+  return REX_SWITCH_PRIO_PRESENT;  // GPU Commands, GPU VSync, Kernel Dispatch
+}
+
+}  // namespace
+#endif
+
 X_STATUS XThread::Create() {
   // Thread kernel object.
   if (!CreateNative<X_KTHREAD>()) {
@@ -434,6 +468,9 @@ X_STATUS XThread::Create() {
   params.create_suspended = true;
   thread_ = rex::thread::Thread::Create(params, [this]() {
     rex::initialize_seh_thread();
+#if REX_PLATFORM_SWITCH
+    RexSwitchSetCurrentThreadPriority(SwitchPriorityFor(guest_thread_, thread_name_));
+#endif
     runtime::ThreadState::Bind(thread_state_.get());
 
     // Set thread ID override. This is used by logging.
@@ -470,9 +507,13 @@ X_STATUS XThread::Create() {
     set_name(fmt::format("XThread{:04X}", thread_->system_id()));
   }
 
+#if !REX_PLATFORM_SWITCH
+  // On Switch the scheme in SwitchPriorityFor decides instead: this value would
+  // reach svcSetThreadPriority as 0 or 1, outside an application's range.
   if (creation_params_.creation_flags & 0x60) {
     thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
   }
+#endif
 
   // Assign the newly created thread to the logical processor, and also set up
   // the current CPU in KPCR and KTHREAD.
@@ -899,7 +940,13 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
   } else {
-    REXSYS_WARN("Too few processor cores - scheduling will be wonky");
+    // Once. With fewer than 6 cores it warned on every call, and the
+    // GPU interrupt makes that call on every vblank: on Switch, 60 warnings per
+    // second written and flushed to the SD (29,771 in six minutes).
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      REXSYS_WARN("Too few processor cores - scheduling will be wonky");
+    }
   }
 }
 
