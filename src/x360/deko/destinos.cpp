@@ -1832,6 +1832,19 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   // The front buffer is still in its render target (and the texture was not written): painted from there.
   const bool desde_destino = frontal_.pendiente && frontal_.base == base;
   const ImagenDk* origen = desde_destino ? frontal_.destino : TexturaResuelta(base);
+  if (!origen && !desde_destino) {
+    // Fallback: the Swap's frontbuffer address matched no resolved texture. Some titles (e.g. Halo 3) present
+    // from an address the Swap's fetch constant does not point at, so the exact lookup finds nothing and the
+    // screen stays black even though a frame was resolved. Show the most-recently written resolved frame
+    // instead. Titles whose frontbuffer base matches a resolve (NFS) find origen above and never reach this.
+    uint32_t mejor_version = 0;
+    for (auto& par : resueltas_) {
+      if (par.second.escrita && par.second.imagen.version >= mejor_version) {
+        mejor_version = par.second.imagen.version;
+        origen = &par.second.imagen;
+      }
+    }
+  }
   const uint32_t ancho_origen = desde_destino ? frontal_.ancho : (origen ? origen->ancho : 0);
   const uint32_t alto_origen = desde_destino ? frontal_.alto : (origen ? origen->alto : 0);
   if (!origen) {
