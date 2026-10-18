@@ -53,6 +53,9 @@ This project is not intended to promote piracy nor unauthorized use of copyright
 
 The list above is not exhaustive. Thanks to everyone in the ReXGlue community who contributes code, files issues, tests builds, and keeps the project moving.
 
+## Nintendo Switch (`switch` branch)
+- [nx-mod](https://github.com/nx-mod) - Switch port: deko3d renderer, platform layer, and the `rex::x360` game-neutral GPU layer.
+
 ## Very Special Thank You:
 - [Project Xenia](https://github.com/xenia-project/xenia/tree/master/src/xenia) - Their invaluable work on Xbox 360 emulation laid the groundwork for ReXGlue's development. This project (and numerous others) would not exist without their hard work and dedication.
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) - For pioneering the modern static recompilation approach for Xbox 360. A lot of the codegen analysis logic and instruction translations are based on their work. Thank you!
