@@ -1,10 +1,16 @@
-set_target_properties(rexcore PROPERTIES EXPORT_NAME core)
-set_target_properties(rexfilesystem PROPERTIES EXPORT_NAME filesystem)
-set_target_properties(rexui PROPERTIES EXPORT_NAME ui)
-set_target_properties(rexinput PROPERTIES EXPORT_NAME input)
-set_target_properties(rexaudio PROPERTIES EXPORT_NAME audio)
-set_target_properties(rexruntime PROPERTIES EXPORT_NAME runtime)
-set_target_properties(rexcodegen PROPERTIES EXPORT_NAME codegen)
+# EXPORT_NAME only for targets that exist in this configuration (host-only
+# targets like rexcodegen are not built on Switch).
+set(_rex_export_names
+    rexcore=core rexfilesystem=filesystem rexui=ui rexinput=input
+    rexaudio=audio rexruntime=runtime rexcodegen=codegen)
+foreach(_pair IN LISTS _rex_export_names)
+    string(REPLACE "=" ";" _kv "${_pair}")
+    list(GET _kv 0 _tgt)
+    list(GET _kv 1 _name)
+    if(TARGET ${_tgt})
+        set_target_properties(${_tgt} PROPERTIES EXPORT_NAME ${_name})
+    endif()
+endforeach()
 
 set(REXGLUE_INSTALL_TARGETS
     rexruntime
@@ -28,6 +34,15 @@ endif()
 if(REXGLUE_ENABLE_TRACY)
     list(APPEND REXGLUE_INSTALL_TARGETS TracyClient)
 endif()
+
+# Keep only targets that exist in this configuration.
+set(_rex_filtered)
+foreach(_t IN LISTS REXGLUE_INSTALL_TARGETS)
+    if(TARGET ${_t})
+        list(APPEND _rex_filtered ${_t})
+    endif()
+endforeach()
+set(REXGLUE_INSTALL_TARGETS ${_rex_filtered})
 
 set(REXGLUE_INSTALL_FIDELITYFX_TARGETS)
 if(TARGET amd_fidelityfx_vk)
