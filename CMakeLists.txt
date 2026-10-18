@@ -287,8 +287,12 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
-add_subdirectory(src/codegen)
-add_subdirectory(src/rexglue)
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    # Host-only: the recompiler and its CLI generate each game's C++ ahead of
+    # time. A Switch build consumes already-generated sources and needs neither.
+    add_subdirectory(src/codegen)
+    add_subdirectory(src/rexglue)
+endif()
 
 # Add tests subdirectory if tests are enabled
 if(REXGLUE_BUILD_TESTS)

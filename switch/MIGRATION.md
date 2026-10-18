@@ -18,5 +18,7 @@ Consumed by `xbox360-nx` as a submodule at `sdk/` (games build with `-DREXSDK_DI
 ### Remaining
 - **Build validation** (Switch, devkitA64): populate `thirdparty/` (init submodules or
   `fetch_thirdparty.py`), then a `-j2` build — the real test of the CMake merge.
+- `tools/switch_setup.py` makes a fresh clone self-sufficient (submodules + deko3d deps + FFmpeg overlay).
+- Host-only `src/codegen` and `src/rexglue` (the CLI) are not built on Switch.
 - Englishize the Spanish deko/`x360` identifiers and comments (one pass).
 - Migrate the game trees into `games/` (currently still in `xbox360-nx`).

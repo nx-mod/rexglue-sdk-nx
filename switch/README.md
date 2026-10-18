@@ -14,3 +14,13 @@ Switch- or game-specific lives in its own folder.
 Rule: a fix that helps every game goes in the SDK; anything that names a
 specific title goes under `games/`. That is what lets NFS gain from Halo's
 work without the two sharing code.
+
+## Building for Switch
+
+`thirdparty/` is git submodules. After cloning, populate what the Switch build needs:
+
+```sh
+python tools/switch_setup.py
+```
+
+It inits the Switch-needed submodules, fetches the deko3d-only sources (SPIRV-Cross, uam) at fixed commits, and lays the Switch FFmpeg config (`switch/overlay/`) over the FFmpeg submodule. Vulkan/SDL/desktop submodules are left untouched. Then configure a consumer with `-DREXGLUE_PLATFORM_SWITCH=ON -DREXGLUE_SWITCH_DEKO3D=ON`.
