@@ -1,18 +1,22 @@
 # Switch SDK lift — tracker
 
-Lifting the nfsmw-nx Switch/deko/`x360` layer onto the fork's clean v0.10.0,
-**keeping Vulkan/D3D12** (Strategy 2, universal). Base confirmed = v0.10.0.
-
-Surface vs v0.10.0: **71 new files + 86 modified**. The Vulkan removal in our
-source tree was commit `c38edd3` (pure deletions + CMake); the fork still has
-every Vulkan file, so we add the Switch layer *on top* rather than restore
-anything. `c38edd3^` had deko + Vulkan side-by-side — the reference for CMake merges.
+The nfsmw-nx Switch/deko/`rex::x360` layer has been lifted onto the fork's clean
+v0.10.0, **keeping Vulkan/D3D12** (universal). Base = v0.10.0 (confirmed).
 
 | Batch | What | Files | State |
 |---|---|---|---|
-| 1 | Pure additions: `x360/`, `ui/deko3d/`, `*/switch/`, `switch_compat/`, FFmpeg-switch, `rexglue_switch.cmake` | 71 | in progress |
-| 2 | SW-only base edits (platform layer: threading/fiber/xthread/xmemory/dynlib/host_path/clock) | 39 | todo |
-| 3 | OTHER base edits (universal fixes; reconcile codegen with the 7 upstream cherry-picks) | 38 | todo |
-| 4 | MIXED CMake (graphics/ui/thirdparty/core/system + presenter/surface): keep Vulkan, add deko | 9 | todo |
+| 1 | Additions: `x360/`, `ui/deko3d/`, `*/switch/`, `switch_compat/`, FFmpeg-switch, `rexglue_switch.cmake` | 70 | ✅ done |
+| 2+3 | Switch platform-layer + base edits; merged with the 7 upstream cherry-picks | 73 | ✅ done |
+| 4 | MIXED CMake: deko wired **alongside** Vulkan/D3D12, selected per platform | 9 | ✅ done |
 
-Build/test only possible after batch 4 wires CMake. Englishization is a later pass.
+Also: `platform.h` detects `__SWITCH__` (→ `REX_PLATFORM_SWITCH`, treated as
+`LINUX` to reuse the `_posix` layer); 4 codegen + 3 build fixes cherry-picked
+from upstream `development` with `-x` provenance.
+
+Consumed by `xbox360-nx` as a submodule at `sdk/` (games build with `-DREXSDK_DIR=$PWD/sdk`).
+
+### Remaining
+- **Build validation** (Switch, devkitA64): populate `thirdparty/` (init submodules or
+  `fetch_thirdparty.py`), then a `-j2` build — the real test of the CMake merge.
+- Englishize the Spanish deko/`x360` identifiers and comments (one pass).
+- Migrate the game trees into `games/` (currently still in `xbox360-nx`).
