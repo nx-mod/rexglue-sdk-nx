@@ -415,7 +415,8 @@ endif()
 #=============================================================================
 # FFmpeg - Audio/video codec library (for XMA decoding)
 # Only builds libavutil and libavcodec needed for WMA Pro decoding
-#=============================================================================
+# NFSMW: also the WMV3 decoder for the cutscenes (config_nfsmw_wmv3.h)
+# =============================================================================
 
 set(FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg")
 
@@ -648,6 +649,48 @@ add_library(libavcodec STATIC
     ${FFMPEG_DIR}/libavcodec/fft_float.c
     ${FFMPEG_DIR}/libavcodec/fft_fixed_32.c
     ${FFMPEG_DIR}/libavcodec/fft_init_table.c
+    # NFSMW: WMV3 (VC-1 main profile) and what it selects
+    ${FFMPEG_DIR}/libavcodec/vc1dec.c
+    ${FFMPEG_DIR}/libavcodec/vc1_block.c
+    ${FFMPEG_DIR}/libavcodec/vc1_loopfilter.c
+    ${FFMPEG_DIR}/libavcodec/vc1_mc.c
+    ${FFMPEG_DIR}/libavcodec/vc1_pred.c
+    ${FFMPEG_DIR}/libavcodec/vc1.c
+    ${FFMPEG_DIR}/libavcodec/vc1data.c
+    ${FFMPEG_DIR}/libavcodec/vc1dsp.c
+    ${FFMPEG_DIR}/libavcodec/msmpeg4dec.c
+    ${FFMPEG_DIR}/libavcodec/msmpeg4.c
+    ${FFMPEG_DIR}/libavcodec/msmpeg4data.c
+    ${FFMPEG_DIR}/libavcodec/wmv2dsp.c
+    ${FFMPEG_DIR}/libavcodec/wmv2data.c
+    ${FFMPEG_DIR}/libavcodec/h263dec.c
+    ${FFMPEG_DIR}/libavcodec/h263.c
+    ${FFMPEG_DIR}/libavcodec/ituh263dec.c
+    ${FFMPEG_DIR}/libavcodec/mpeg4video.c
+    ${FFMPEG_DIR}/libavcodec/mpeg4videodec.c
+    ${FFMPEG_DIR}/libavcodec/h263data.c
+    ${FFMPEG_DIR}/libavcodec/h263_parser.c
+    ${FFMPEG_DIR}/libavcodec/h263dsp.c
+    ${FFMPEG_DIR}/libavcodec/mpegvideo.c
+    ${FFMPEG_DIR}/libavcodec/mpegvideodsp.c
+    ${FFMPEG_DIR}/libavcodec/rl.c
+    ${FFMPEG_DIR}/libavcodec/mpegvideo_motion.c
+    ${FFMPEG_DIR}/libavcodec/mpegutils.c
+    ${FFMPEG_DIR}/libavcodec/mpegvideodata.c
+    ${FFMPEG_DIR}/libavcodec/mpegpicture.c
+    ${FFMPEG_DIR}/libavcodec/mpeg_er.c
+    ${FFMPEG_DIR}/libavcodec/error_resilience.c
+    ${FFMPEG_DIR}/libavcodec/qpeldsp.c
+    ${FFMPEG_DIR}/libavcodec/blockdsp.c
+    ${FFMPEG_DIR}/libavcodec/h264qpel.c
+    ${FFMPEG_DIR}/libavcodec/intrax8.c
+    ${FFMPEG_DIR}/libavcodec/intrax8dsp.c
+    ${FFMPEG_DIR}/libavcodec/h264chroma.c
+    ${FFMPEG_DIR}/libavcodec/hpeldsp.c
+    ${FFMPEG_DIR}/libavcodec/me_cmp.c
+    ${FFMPEG_DIR}/libavcodec/videodsp.c
+    ${FFMPEG_DIR}/libavcodec/pixblockdsp.c
+    ${FFMPEG_DIR}/libavcodec/startcode.c
 )
 
 # Windows-specific source
@@ -667,6 +710,19 @@ if(IS_X86_64)
         ${FFMPEG_DIR}/libavcodec/x86/fdct.c
         ${FFMPEG_DIR}/libavcodec/x86/mpegaudiodsp.c
         ${FFMPEG_DIR}/libavcodec/x86/dct_init.c
+        # NFSMW: WMV3 initializations (C only: no assembly on the PC)
+        ${FFMPEG_DIR}/libavcodec/x86/blockdsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/h263dsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/h264chroma_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/h264_qpel.c
+        ${FFMPEG_DIR}/libavcodec/x86/hpeldsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/me_cmp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/mpegvideo.c
+        ${FFMPEG_DIR}/libavcodec/x86/mpegvideodsp.c
+        ${FFMPEG_DIR}/libavcodec/x86/pixblockdsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/qpeldsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/vc1dsp_init.c
+        ${FFMPEG_DIR}/libavcodec/x86/videodsp_init.c
     )
 endif()
 
@@ -681,6 +737,19 @@ if(IS_ARM64)
         ${FFMPEG_DIR}/libavcodec/aarch64/neon.S
         ${FFMPEG_DIR}/libavcodec/aarch64/mpegaudiodsp_init.c
         ${FFMPEG_DIR}/libavcodec/aarch64/mpegaudiodsp_neon.S
+        # NFSMW: NEON for WMV3
+        ${FFMPEG_DIR}/libavcodec/aarch64/h264chroma_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/h264cmc_neon.S
+        ${FFMPEG_DIR}/libavcodec/aarch64/h264qpel_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/h264qpel_neon.S
+        ${FFMPEG_DIR}/libavcodec/aarch64/hpeldsp_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/hpeldsp_neon.S
+        ${FFMPEG_DIR}/libavcodec/aarch64/idctdsp_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/pixblockdsp_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/pixblockdsp_neon.S
+        ${FFMPEG_DIR}/libavcodec/aarch64/videodsp_init.c
+        ${FFMPEG_DIR}/libavcodec/aarch64/vc1dsp_init_aarch64.c
+        ${FFMPEG_DIR}/libavcodec/neon/mpegvideo.c
     )
     target_compile_definitions(libavcodec PRIVATE
         HAVE_NEON=1
