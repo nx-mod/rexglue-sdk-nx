@@ -38,6 +38,10 @@
 #elif defined(__gnu_linux__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
+#elif defined(__SWITCH__)
+// Nintendo Switch homebrew (devkitPro libnx, Horizon OS). aarch64, newlib-based;
+// not Linux. OS codename Horizon, mirrored by REX_PLATFORM_HORIZON below.
+#define REX_PLATFORM_SWITCH 1
 #else
 #error Unsupported target OS.
 #endif
@@ -58,6 +62,13 @@
 #endif
 #ifndef REX_PLATFORM_LINUX
 #define REX_PLATFORM_LINUX 0
+#endif
+#ifndef REX_PLATFORM_SWITCH
+#define REX_PLATFORM_SWITCH 0
+#endif
+// OS codename used by the Switch backend files (*_horizon.cpp); same platform.
+#ifndef REX_PLATFORM_HORIZON
+#define REX_PLATFORM_HORIZON REX_PLATFORM_SWITCH
 #endif
 
 #if defined(__clang__)
