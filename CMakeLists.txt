@@ -31,10 +31,17 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
     add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
 endif()
 
+option(REXGLUE_PLATFORM_SWITCH             "Build for Nintendo Switch (devkitA64 + libnx; set by the toolchain file)" OFF)
+option(REXGLUE_SWITCH_DEKO3D               "Switch: title-provided deko3d renderer, no Vulkan or NVK" OFF)
+
 # Graphics backend selection
 # D3D12: Windows only, ON by default.
 # Vulkan: Cross-platform, ON by default on Linux, OFF by default on Windows.
-if(WIN32)
+if(REXGLUE_PLATFORM_SWITCH)
+    # deko3d is the renderer; the title provides it. No desktop backend.
+    set(REXGLUE_USE_D3D12 OFF)
+    set(REXGLUE_USE_VULKAN OFF)
+elseif(WIN32)
     option(REXGLUE_USE_D3D12  "Enable D3D12 graphics backend" ON)
     option(REXGLUE_USE_VULKAN "Enable Vulkan graphics backend" OFF)
 else()
@@ -42,12 +49,15 @@ else()
     option(REXGLUE_USE_VULKAN "Enable Vulkan graphics backend" ON)
 endif()
 
-if(NOT REXGLUE_USE_D3D12 AND NOT REXGLUE_USE_VULKAN)
-    message(FATAL_ERROR "At least one graphics backend must be enabled (REXGLUE_USE_D3D12 or REXGLUE_USE_VULKAN)")
+if(REXGLUE_SWITCH_DEKO3D AND NOT REXGLUE_PLATFORM_SWITCH)
+    message(FATAL_ERROR "REXGLUE_SWITCH_DEKO3D is for the Nintendo Switch build only")
+endif()
+if(NOT REXGLUE_USE_D3D12 AND NOT REXGLUE_USE_VULKAN AND NOT REXGLUE_SWITCH_DEKO3D)
+    message(FATAL_ERROR "At least one graphics backend must be enabled (REXGLUE_USE_D3D12, REXGLUE_USE_VULKAN, or REXGLUE_SWITCH_DEKO3D)")
 endif()
 
 if (REXGLUE_ENABLE_FIDELITYFX AND
-    NOT (REXGLUE_USE_VULKAN OR REXGLUE_USE_D3D12))
+    NOT (REXGLUE_USE_VULKAN OR REXGLUE_USE_D3D12 OR REXGLUE_SWITCH_DEKO3D))
     message(FATAL_ERROR
         "REXGLUE_ENABLE_FIDELITYFX requires at least one graphics backend")
 endif()
@@ -59,6 +69,10 @@ set(REXGLUE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_helpers.cmake)
+
+if(REXGLUE_PLATFORM_SWITCH)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/rexglue_switch.cmake)
+endif()
 
 if(UNIX AND NOT APPLE)
     # Keep installed binaries self-contained by resolving shared libs relative
@@ -79,8 +93,13 @@ elseif(APPLE)
     set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 endif()
 
-# Enforce a Clang toolchain (LLVM Clang or Apple's Clang)
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
+# Enforce a Clang toolchain (LLVM Clang or Apple's Clang). Nintendo Switch is the
+# exception: devkitA64 ships only GCC, which builds the runtime and generated code.
+if(REXGLUE_PLATFORM_SWITCH)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(FATAL_ERROR "The Nintendo Switch build uses devkitA64's GCC (switch toolchain file)")
+    endif()
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
     message(FATAL_ERROR "ReXGlue requires the Clang compiler (LLVM Clang or AppleClang). Please set CMAKE_CXX_COMPILER to clang++")
 endif()
 
@@ -131,7 +150,9 @@ endif()
 # Global compile options
 add_compile_options(
     -fno-strict-aliasing
-    -ffp-model=strict
+    # GCC (Switch) has no -ffp-model; -ffp-contract=off stops FMA fusion that
+    # drifts from the PPC results. Clang keeps -ffp-model=strict.
+    $<IF:$<CXX_COMPILER_ID:GNU>,-ffp-contract=off,-ffp-model=strict>
     $<$<CONFIG:DEBUG>:-g>
     $<$<CONFIG:DEBUG>:-O0>
     $<$<CONFIG:RELEASE>:-O3>
@@ -149,7 +170,13 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     list(GET CMAKE_OSX_ARCHITECTURES 0 REX_TARGET_PROCESSOR)
 endif()
 
-if(WIN32)
+if(REXGLUE_PLATFORM_SWITCH)
+    # Horizon on aarch64. Detected via __SWITCH__ (rex/platform.h);
+    # CMAKE_SYSTEM_NAME is Generic, so neither WIN32 nor UNIX is set.
+    set(REX_PLATFORM "switch-arm64")
+    include_directories(BEFORE SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/switch_compat)
+    add_compile_definitions(REX_PLATFORM_SWITCH=1)
+elseif(WIN32)
     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
         set(REX_PLATFORM "win-amd64")
     elseif(REX_TARGET_PROCESSOR MATCHES "aarch64|ARM64|arm64")

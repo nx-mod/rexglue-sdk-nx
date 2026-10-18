@@ -48,7 +48,12 @@ set(REXSYSTEM_SOURCES
     xex_module.cpp
 )
 
-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+if(REXGLUE_PLATFORM_SWITCH)
+    # A NRO is a single static executable: no shared libraries, no dlopen.
+    add_library(rexruntime STATIC ${REXSYSTEM_SOURCES})
+else()
+    add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+endif()
 add_library(rex::runtime ALIAS rexruntime)
 add_library(rex::system ALIAS rexruntime)
 add_library(rex::kernel ALIAS rexruntime)
@@ -85,12 +90,14 @@ target_link_libraries(rexruntime
         fmt::fmt
         spdlog::spdlog
         tomlplusplus
-        SDL3::SDL3
     PRIVATE
         aes128
         mspack
         xxHash::xxhash
 )
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    target_link_libraries(rexruntime PUBLIC SDL3::SDL3)
+endif()
 
 if(REXGLUE_ENABLE_TRACY)
     # TARGET_NAME is what tells install(EXPORT) this text is a target to
@@ -124,4 +131,8 @@ if(REXGLUE_USE_VULKAN)
         spirv-tools-headers
     )
     target_compile_definitions(rexruntime PUBLIC REX_HAS_VULKAN=1)
+endif()
+if(REXGLUE_SWITCH_DEKO3D)
+    # The title's deko3d renderer: no GPU plugin linked (gpu_plugin_loader.cpp).
+    target_compile_definitions(rexruntime PRIVATE REXGLUE_SWITCH_DEKO3D=1)
 endif()

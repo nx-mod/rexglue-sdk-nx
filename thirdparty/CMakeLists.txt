@@ -41,8 +41,11 @@ set(REQUIRED_SUBMODULES
     fmt
     utfcpp
     imgui
-    sdl3
 )
+# SDL3 everywhere except Switch, where libnx backends replace it.
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    list(APPEND REQUIRED_SUBMODULES sdl3)
+endif()
 
 if(REXGLUE_USE_VULKAN)
     list(APPEND REQUIRED_SUBMODULES
@@ -64,10 +67,13 @@ if(REXGLUE_BUILD_TESTS)
 endif()
 
 foreach(submodule ${REQUIRED_SUBMODULES})
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/.git")
+    # A non-empty folder counts as present: real git submodules have .git, and
+    # Switch fetches sources without it (tools/fetch_thirdparty.py).
+    file(GLOB _submodule_files "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/*")
+    if(NOT _submodule_files)
         message(FATAL_ERROR
-            "Git submodule '${submodule}' is not initialized.\n"
-            "Please run: git submodule update --init --recursive\n"
+            "Third-party source '${submodule}' is missing.\n"
+            "Please run: python tools/fetch_thirdparty.py\n"
             "from the repository root directory."
         )
     endif()

@@ -74,6 +74,19 @@ elseif(UNIX)
         system_posix.cpp
         threading_posix.cpp
     )
+elseif(REXGLUE_PLATFORM_SWITCH)
+    # Horizon/libnx/devkitA64. CMAKE_SYSTEM_NAME is Generic, so neither WIN32 nor
+    # UNIX is set; most of the POSIX layer builds on newlib and the gaps go into
+    # the *_switch.cpp files.
+    target_sources(rexcore PRIVATE
+        atomic_posix.cpp clock_posix.cpp dbg_posix.cpp
+        filesystem_posix.cpp math_gcc.cpp
+        platform/console_posix.cpp platform/env_posix.cpp
+        socket_posix.cpp system_posix.cpp threading_posix.cpp
+        threading_switch.cpp dynlib_switch.cpp exception_handler_switch.cpp
+        fiber_switch.cpp guest_memory_switch.cpp mapped_memory_switch.cpp
+        memory_switch.cpp seh_switch.cpp switch_libc_supplement.c
+    )
 endif()
 
 # Xenos data-format layer (stateless; headers under include/rex/graphics/).

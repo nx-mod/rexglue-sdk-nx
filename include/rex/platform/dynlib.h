@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 
@@ -45,6 +46,18 @@ class DynamicLibrary {
   void* handle_ = nullptr;
 };
 
+#if REX_PLATFORM_SWITCH
+// A library linked into the NRO in place of a shared library (a recompiled guest DLL, see
+// rexglue_switch_link_module in rexglue_switch.cmake). Once registered, DynamicLibrary::Load
+// finds it by name and GetRawSymbol returns the addresses given here. Registration runs from
+// static constructors, before main.
+struct StaticLibrarySymbol {
+  const char* name;
+  void* address;
+};
+void RegisterStaticLibrary(const char* name, const StaticLibrarySymbol* symbols, size_t count);
+#endif
+
 namespace lib_names {
 
 #if REX_PLATFORM_WIN32
@@ -52,6 +65,13 @@ namespace lib_names {
 inline constexpr const char* kVulkanLoader = "vulkan-1.dll";
 inline constexpr const char* kRenderDoc = "renderdoc.dll";
 inline constexpr const char* kSpirvToolsSdkPath = "Bin/SPIRV-Tools-shared.dll";
+
+#elif REX_PLATFORM_SWITCH
+
+// There is no dynamic loading on Switch: everything is linked statically.
+inline constexpr const char* kVulkanLoader = "";
+inline constexpr const char* kRenderDoc = "";
+inline constexpr const char* kSpirvToolsSdkPath = "";
 
 #elif REX_PLATFORM_ANDROID
 
