@@ -307,7 +307,10 @@ if(UNIX AND NOT APPLE)
     set(SDL_PIPEWIRE_SHARED   ON  CACHE BOOL "" FORCE)
 endif()
 
-add_subdirectory(sdl3)
+# SDL3 is not built on Switch (libnx backends replace it).
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    add_subdirectory(sdl3)
+endif()
 
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)
