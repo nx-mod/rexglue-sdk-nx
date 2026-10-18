@@ -10,6 +10,8 @@
 
 #include <rex/x360/peticion.h>
 
+#include <rex/graphics/registers.h>
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -48,6 +50,19 @@ struct RegistrosCopia {
 struct TexturaSwap {
   uint32_t dword[6] = {};
 };
+
+// Build the Swap's TexturaSwap from a game's register mirror. VdSwap writes the frontbuffer descriptor into
+// fetch constant 0 just before the Swap packet; the renderer reads the frontbuffer's physical address from
+// swap.dword[1] (see RenderDk::Presentar / TexturaResuelta). Every game's ring reader does this on a Swap, so
+// it lives here: pass the result to DestinosNativos::Presentar. An empty TexturaSwap leaves base=0 and the
+// renderer finds no resolved texture (black screen).
+inline TexturaSwap LeerTexturaSwap(const uint32_t* registros) {
+  TexturaSwap t;
+  for (uint32_t i = 0; i < 6; ++i) {
+    t.dword[i] = registros[rex::graphics::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + i];
+  }
+  return t;
+}
 
 class DestinosNativos {
  public:
