@@ -246,6 +246,10 @@ target_include_directories(imgui PUBLIC
     $<BUILD_INTERFACE:${IMGUI_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_options(imgui PRIVATE -w)
+if(REXGLUE_PLATFORM_SWITCH)
+    # Its default "open in shell" uses fork/execvp/waitpid, which Horizon lacks.
+    target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+endif()
 
 #=============================================================================
 # SDL3 - Cross-platform media layer
