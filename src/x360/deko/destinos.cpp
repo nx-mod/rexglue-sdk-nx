@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1847,6 +1848,31 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   }
   const uint32_t ancho_origen = desde_destino ? frontal_.ancho : (origen ? origen->ancho : 0);
   const uint32_t alto_origen = desde_destino ? frontal_.alto : (origen ? origen->alto : 0);
+  // DIAG (picture / "2 frames"): to stderr so it survives a crash in rex_stderr.log. Logs the swap's
+  // frontbuffer, the chosen source, and every resolved texture, so we can see which of the two is the
+  // real scene vs the empty/white one. First swaps only. No behavior change.
+  {
+    static int diag_pres = 0;
+    if (diag_pres < 48) {
+      ++diag_pres;
+      std::fprintf(stderr,
+                   "[present] swap base=%08X want=%ux%u desde_destino=%d origen=%s %ux%u | resueltas=%zu:",
+                   base, ancho, alto, int(desde_destino),
+                   origen ? (desde_destino ? "frontal" : "resuelta") : "NINGUNA", ancho_origen, alto_origen,
+                   resueltas_.size());
+      for (const auto& par : resueltas_) {
+        std::fprintf(stderr, " [%08X %ux%u v%llu %c%s]", par.first, par.second.imagen.ancho,
+                     par.second.imagen.alto, (unsigned long long)par.second.imagen.version,
+                     par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
+      }
+      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu causas:", ultimo_frontal_,
+                   (unsigned long long)rechazados_, (unsigned long long)copias_3d_);
+      for (const auto& c : causas_) {
+        std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
+      }
+      std::fprintf(stderr, "\n");
+    }
+  }
   if (!origen) {
     Rechazar(4, "Swap sin textura resuelta");
   } else if (presentador) {
@@ -1875,6 +1901,19 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   }
   if (!llamada) {
     CerrarTrabajo();
+  }
+  if (volcando_captura_) {
+    std::fprintf(stderr, "[dibujos de la captura %d] fotograma %llu, ultimos %zu dibujos:\n", volcando_captura_,
+                 static_cast<unsigned long long>(fotograma_), volcado_dibujos_.size());
+    for (const std::string& linea : volcado_dibujos_) {
+      std::fprintf(stderr, "%s\n", linea.c_str());
+    }
+    std::fflush(stderr);
+    volcado_dibujos_.clear();
+    volcando_captura_ = 0;
+  }
+  if (const int32_t pedida = g_volcar_dibujos_captura.exchange(0, std::memory_order_relaxed)) {
+    volcando_captura_ = pedida;
   }
   ++fotograma_;
   geometria_.NuevoFotograma(fotograma_);

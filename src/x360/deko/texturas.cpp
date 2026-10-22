@@ -14,6 +14,9 @@
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 
+// Inlined (same values as the library): the per-draw keys hash a few dozen bytes each, where an out-of-line call
+// costs more than the hash (see geometria.cpp).
+#define XXH_INLINE_ALL
 #include <xxhash.h>
 
 #include <algorithm>

@@ -49,6 +49,11 @@ struct PeticionDibujo {
   uint64_t generacion_vs = 0;                // changes with every VS IM_LOAD
   uint64_t generacion_constantes_vs = 0;     // changes when 0x4000-0x43FF are written
   uint64_t generacion_constantes_ps = 0;     // changes when 0x4400-0x47FF are written
+  // Optional: the 16-byte constant registers written with a new value since the renderer last emptied this, as
+  // [desde, hasta) for the VS block ([0], [1]) and the PS block ([2], [3]); empty while desde >= hasta. The sink owns
+  // it and widens it with every change; the renderer compares only that part of what it has already pushed and then
+  // empties it. Null: the renderer compares everything the shader reads after a generation change.
+  uint32_t* sucio_constantes = nullptr;
   /*
    * The two most expensive stages of recording a draw on the console are "texturas" (4.1 ms per frame) and
    * the viewport/scissor that the C6 report includes in "pipeline". Both are pure functions of registers

@@ -2,6 +2,10 @@
 
 #include <rex/x360/deko/geometria.h>
 
+// XXH3 inlined here (the same algorithm and values as the library's): the store hashes ranges in 64-byte lines, and
+// an out-of-line XXH3_64bits call per line was the ring thread's largest single cost in a race (run of 2026-10-22:
+// ~13 % of its samples under HuellaFase). With the length a constant 64 the compiler emits the fixed 17-128 byte path.
+#define XXH_INLINE_ALL
 #include <xxhash.h>
 
 #include <algorithm>
@@ -41,7 +45,10 @@ uint64_t Plegar(uint64_t h, uint64_t v) {
 
 uint64_t HuellaLinea(const uint8_t* datos, uint32_t bytes, uint32_t i) {
   const uint32_t inicio = i * kLinea;
-  return XXH3_64bits(datos + inicio, std::min(kLinea, bytes - inicio));
+  if (bytes - inicio >= kLinea) {
+    return XXH3_64bits(datos + inicio, kLinea);  // full line: constant length, inlined
+  }
+  return XXH3_64bits(datos + inicio, bytes - inicio);
 }
 
 }  // namespace

@@ -18,10 +18,14 @@
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
 
+// Inlined (same values as the library): the per-draw keys hash a few dozen bytes each, where an out-of-line call
+// costs more than the hash (see geometria.cpp).
+#define XXH_INLINE_ALL
 #include <xxhash.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include <rex/ui/deko3d/compilador.h>
@@ -29,6 +33,9 @@
 #include <rex/x360/deko/render.h>
 #include <rex/x360/shader_entry.h>
 #include <rex/x360/xenos.h>
+
+// The rexglue log folder, ending in '/' (switch_crash_hooks.c).
+extern "C" const char* RexSwitchLogDir(void);
 // The glow's bright pass variants (nfsmw_resplandor_cielo), made from the game's shader by tools/switch/dk_resplandor.py
 // and not distributed. Without them the setting keeps the game's shader, as in the Vulkan build.
 
@@ -49,6 +56,17 @@ REXCVAR_DEFINE_INT32(nfsmw_nativo_sombras_sesgo_constante, 0, "NFSMW",
                      "Renderizador nativo (25/09, build 181): desplazamiento de profundidad constante en el mapa de "
                      "sombras, en miles de unidades de 24 bits (1 = 1000). 0 = sin constante. Se cambia en marcha")
     .range(0, 1000);
+REXCVAR_DEFINE_BOOL(nfsmw_dk_diag_combinaciones, false, "NFSMW",
+                    "Diagnostico: una linea en stderr (logs/rex/rex_stderr.log, sobrevive al cierre) por cada "
+                    "combinacion nueva de shaders, mezcla y texturas de un dibujo. Para encontrar el dibujo de un "
+                    "fallo que se ve un momento (el cristal roto del final de la introduccion)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nfsmw_dk_diag_ps, -1, "NFSMW",
+                     "Diagnostico: para los dibujos de este pixel shader (su numero n de la biblioteca) con una textura "
+                     "de 512 o mas de ancho, vuelca 1 MB de la memoria de esa textura a logs/rex/ cada vez que su "
+                     "contenido cambia (12 como mucho) y escribe en stderr su umbral y funcion de alfa y sus constantes "
+                     "c0-c3. -1 = apagado")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nfsmw_nativo_saltar_invisibles, true, "NFSMW",
                     "Renderizador nativo (20/09): saltarse los dibujos que no pueden cambiar ni un pixel (mezcla que "
                     "copia el destino, o prueba de alfa con la funcion NUNCA)");
@@ -1385,6 +1403,70 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     std::memcpy(texturas_previas_.inversos.data(), compartidas + kPalabraInvTamano, sizeof(texturas_previas_.inversos));
     texturas_previas_.tex0 = {tex0_ancho, tex0_alto, tex0_formato, tex0_sampler};
   }
+  // nfsmw_dk_diag_combinaciones: each new combination once, to stderr (the buffered log loses its tail when the
+  // game is closed). Image slots 0-2 are the empty textures; "R" marks a resolved (render target) texture.
+  if (ps && REXCVAR_GET(nfsmw_dk_diag_combinaciones)) {
+    static std::unordered_map<uint64_t, bool> vistas;
+    uint64_t clave = XXH3_64bits(&ps, sizeof(ps)) ^ (XXH3_64bits(&p.vs, sizeof(p.vs)) * 3);
+    const uint32_t estado[4] = {r[gr::XE_GPU_REG_RB_BLENDCONTROL0], r[gr::XE_GPU_REG_RB_COLORCONTROL],
+                                r[gr::XE_GPU_REG_RB_COLOR_MASK], r[gr::XE_GPU_REG_RB_DEPTHCONTROL]};
+    clave = XXH3_64bits_withSeed(estado, sizeof(estado), clave);
+    std::string texto;
+    for (const SamplerShader& sampler : ps->samplers) {
+      if (sampler.registro >= 16) {
+        continue;
+      }
+      const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.registro) * 6;
+      const uint32_t base = ((fetch[1] >> 12) << 12) & 0x1FFFFFFF;
+      const uint32_t formato = fetch[1] & 0x3F;
+      const uint32_t ranura = uint32_t(texturas[sampler.registro] & 0xFFFFF);
+      const uint32_t marca[3] = {base, formato, ranura < 3 ? 0u : 1u};
+      clave = XXH3_64bits_withSeed(marca, sizeof(marca), clave);
+      texto += fmt::format(" t{}={:08X}/f{}/{}x{}/sw{:03X}{}{}", sampler.registro, base, formato,
+                           (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1, (fetch[3] >> 1) & 0xFFF,
+                           ranura < 3 ? "/VACIA" : "", TexturaResuelta(base) ? "/R" : "");
+    }
+    if (vistas.size() < 20000 && vistas.emplace(clave, true).second) {
+      std::fprintf(stderr, "[combo] f%llu PS n%u VS n%u pase %ux%u mezcla %08X color %08X mascara %08X z %08X%s\n",
+                   static_cast<unsigned long long>(fotograma_), ps->numero, p.vs ? p.vs->numero : 0u, g_.pase_ancho,
+                   g_.pase_alto, estado[0], estado[1], estado[2], estado[3], texto.c_str());
+    }
+  }
+  // nfsmw_dk_diag_ps: the guest bytes of one shader's large textures, each time they change.
+  if (ps && int32_t(ps->numero) == REXCVAR_GET(nfsmw_dk_diag_ps)) {
+    static std::unordered_map<uint64_t, bool> volcadas;
+    for (const SamplerShader& sampler : ps->samplers) {
+      if (sampler.registro >= 16 || volcadas.size() >= 12) {
+        continue;
+      }
+      const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.registro) * 6;
+      if ((fetch[2] & 0x1FFF) + 1 < 512) {
+        continue;
+      }
+      const uint32_t base = ((fetch[1] >> 12) << 12) & 0x1FFFFFFF;
+      constexpr size_t kBytes = 1u << 20;
+      const uint8_t* crudo = memoria_->TranslatePhysical(base);
+      const uint64_t contenido = XXH3_64bits(crudo, kBytes) ^ base;
+      if (!volcadas.emplace(contenido, true).second) {
+        continue;
+      }
+      float c[16];
+      std::memcpy(c, r + kRegConstantesPs, sizeof(c));
+      std::fprintf(stderr,
+                   "[diag_ps] f%llu PS n%u t%u=%08X contenido %016llX fetch %08X %08X %08X %08X %08X %08X colorcontrol "
+                   "%08X alpha_ref %g mezcla %08X c0 (%g %g %g %g) c1 (%g %g %g %g) c2 (%g %g %g %g) c3 (%g %g %g %g)\n",
+                   static_cast<unsigned long long>(fotograma_), ps->numero, sampler.registro, base,
+                   static_cast<unsigned long long>(contenido), fetch[0], fetch[1], fetch[2], fetch[3], fetch[4],
+                   fetch[5], r[gr::XE_GPU_REG_RB_COLORCONTROL], Flotante(r[gr::XE_GPU_REG_RB_ALPHA_REF]),
+                   r[gr::XE_GPU_REG_RB_BLENDCONTROL0], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9],
+                   c[10], c[11], c[12], c[13], c[14], c[15]);
+      const std::string ruta = fmt::format("{}diag_tex_{:08X}_f{}.bin", RexSwitchLogDir(), base, fotograma_);
+      if (FILE* f = std::fopen(ruta.c_str(), "wb")) {
+        std::fwrite(crudo, 1, kBytes, f);
+        std::fclose(f);
+      }
+    }
+  }
 
   cortar_etapa(1);
   // --- Upload space for everything this draw needs from here on, all in one slot
@@ -1822,11 +1904,29 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       bloque_ps_generacion_ = p.generacion_constantes_ps;
       bloque_vs_cubierto_ = kUboBytesVs;
       bloque_ps_cubierto_ = kUboBytesPs;
+      if (uint32_t* s = p.sucio_constantes) {  // everything is in sync now
+        s[0] = s[2] = 256;
+        s[1] = s[3] = 0;
+      }
     } else {
-      // What changed since what was pushed, within what this draw's shaders read.
+      // What changed since what was pushed, within what this draw's shaders read. With the sink's dirty range only
+      // the registers written since are compared inside what is already pushed (the rest of it still equals the
+      // registers); without it, everything the shader reads.
+      uint32_t* const sucio = p.sucio_constantes;
       if (bloque_vs_generacion_ != p.generacion_constantes_vs) {
         bloque_vs_generacion_ = p.generacion_constantes_vs;
-        bloque_vs_cubierto_ = 0;
+        if (sucio) {
+          const uint32_t desde = std::min(sucio[0] * 16, bloque_vs_cubierto_);
+          const uint32_t hasta = std::min(sucio[1] * 16, bloque_vs_cubierto_);
+          if (desde < hasta) {
+            registros_empujados_ += EmpujarDiferencias(cmd, bloque_vs_, kUboBytesVs, r + kRegConstantesVs,
+                                                       sombra_vs_.data(), desde, hasta, empujes_);
+          }
+          sucio[0] = 256;
+          sucio[1] = 0;
+        } else {
+          bloque_vs_cubierto_ = 0;
+        }
       }
       if (bytes_vs > bloque_vs_cubierto_) {
         registros_empujados_ += EmpujarDiferencias(cmd, bloque_vs_, kUboBytesVs, r + kRegConstantesVs,
@@ -1836,7 +1936,18 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       if (ps) {
         if (bloque_ps_generacion_ != p.generacion_constantes_ps) {
           bloque_ps_generacion_ = p.generacion_constantes_ps;
-          bloque_ps_cubierto_ = 0;
+          if (sucio) {
+            const uint32_t desde = std::min(sucio[2] * 16, bloque_ps_cubierto_);
+            const uint32_t hasta = std::min(sucio[3] * 16, bloque_ps_cubierto_);
+            if (desde < hasta) {
+              registros_empujados_ += EmpujarDiferencias(cmd, bloque_ps_, kUboBytesPs, r + kRegConstantesPs,
+                                                         sombra_ps_.data(), desde, hasta, empujes_);
+            }
+            sucio[2] = 256;
+            sucio[3] = 0;
+          } else {
+            bloque_ps_cubierto_ = 0;
+          }
         }
         if (bytes_ps > bloque_ps_cubierto_) {
           registros_empujados_ += EmpujarDiferencias(cmd, bloque_ps_, kUboBytesPs, r + kRegConstantesPs,
@@ -1942,6 +2053,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     // empty 1x1 textures (3), and writing only target 0 (4): which part of its cost is the sampling, the texture
     // reads or the outputs.
     const uint32_t elementos = con_indices ? n_indices : cuenta;
+    if (volcando_captura_) {
+      std::string linea = fmt::format(
+          "  d PS n{} VS n{} pase {}x{} vp {:.0f},{:.0f} {:.0f}x{:.0f} prim {} elem {} mezcla {:08X} color {:08X} ref {:.3f} "
+          "mascaras {:04X} z {:08X}",
+          ps ? ps->numero : 9999u, p.vs ? p.vs->numero : 9999u, g_.pase_ancho, g_.pase_alto, viewport[0], viewport[1],
+          viewport[2], viewport[3], uint32_t(primitiva), elementos, r[gr::XE_GPU_REG_RB_BLENDCONTROL0],
+          r[gr::XE_GPU_REG_RB_COLORCONTROL], Flotante(r[gr::XE_GPU_REG_RB_ALPHA_REF]), mascaras, control_profundidad);
+      if (ps) {
+        for (const SamplerShader& sampler : ps->samplers) {
+          if (sampler.registro < 16) {
+            const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.registro) * 6;
+            const uint32_t base = ((fetch[1] >> 12) << 12) & 0x1FFFFFFF;
+            linea += fmt::format(" t{}={:08X}/f{}/{}x{}{}{}", sampler.registro, base, fetch[1] & 0x3F,
+                                 (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1,
+                                 (texturas[sampler.registro] & 0xFFFFF) < 3 ? "/VACIA" : "",
+                                 TexturaResuelta(base) ? "/R" : "");
+          }
+        }
+      }
+      volcado_dibujos_.push_back(std::move(linea));
+      if (volcado_dibujos_.size() > 300) {
+        volcado_dibujos_.pop_front();
+      }
+    }
     const bool variantes = repetir && n_texturas && elementos <= 6 && REXCVAR_GET(nfsmw_dk_perfil_variantes);
     uint32_t veces[5] = {0, 1};
     uint32_t n_veces = repetir ? 2 : 1;

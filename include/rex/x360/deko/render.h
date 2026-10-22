@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -416,6 +417,9 @@ class RenderDk final : public DestinosNativos {
   // Work slots and frames
   uint64_t trabajo_ = 0;
   uint64_t fotograma_ = 1;
+  // g_volcar_dibujos_captura: the capture whose next frame is being listed, and its last draws.
+  int32_t volcando_captura_ = 0;
+  std::deque<std::string> volcado_dibujos_;
   uint64_t serie_imagenes_ = 0;
 
   // Render targets, resolved textures

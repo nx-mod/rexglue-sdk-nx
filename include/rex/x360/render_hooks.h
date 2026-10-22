@@ -6,6 +6,7 @@
 // the renderer behaves as the plain Xbox 360 GPU would.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -15,6 +16,10 @@
 namespace rex::x360 {
 
 struct EntradaShader;
+
+// Diagnostic: a game's PNG capture sets this to the capture's number, and the renderer writes the last draws of the
+// next frame to stderr under that number (it survives closing the game, unlike the buffered log). 0 = nothing asked.
+inline std::atomic<int32_t> g_volcar_dibujos_captura{0};
 
 // A colour grade applied in the output pass. All-neutral by default (no change).
 struct PostProcess {
