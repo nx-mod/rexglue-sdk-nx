@@ -129,6 +129,37 @@ std::atomic<uint32_t> g_sincronizaciones_anillo{0};
 
 namespace {
 
+// The geometry shader of rectangle lists (as Xenia's): the three corners of each rectangle in, a strip of four out.
+// The corner at the right angle (c) is the one off the longest edge; the fourth is a + b - c for the position and for
+// every interpolator (the 25 locations the translators write: TEXCOORD0-15 at 0-15, then COLOR and the rest).
+// Strip c, a, b, d keeps the winding of the game's triangle (c, a, b is it, rotated).
+std::string GlslRectangulos() {
+  constexpr int kUbicaciones = 25;
+  std::string g = "#version 460\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 4) out;\n";
+  for (int k = 0; k < kUbicaciones; ++k) {
+    g += "layout(location = " + std::to_string(k) + ") in vec4 e" + std::to_string(k) + "[];\n";
+    g += "layout(location = " + std::to_string(k) + ") out vec4 s" + std::to_string(k) + ";\n";
+  }
+  std::string copiar, cuarto;
+  for (int k = 0; k < kUbicaciones; ++k) {
+    const std::string n = std::to_string(k);
+    copiar += " s" + n + " = e" + n + "[i];";
+    cuarto += " s" + n + " = e" + n + "[a] + e" + n + "[b] - e" + n + "[c];";
+  }
+  g += "void Copiar(int i) { gl_Position = gl_in[i].gl_Position;" + copiar + " EmitVertex(); }\n";
+  g += "void Cuarto(int a, int b, int c) {\n"
+       "  gl_Position = gl_in[a].gl_Position + gl_in[b].gl_Position - gl_in[c].gl_Position;" + cuarto + "\n"
+       "  EmitVertex();\n}\n";
+  g += "vec2 Punto(int i) { return gl_in[i].gl_Position.xy / gl_in[i].gl_Position.w; }\n"
+       "void main() {\n"
+       "  vec2 p0 = Punto(0), p1 = Punto(1), p2 = Punto(2);\n"
+       "  float d01 = dot(p1 - p0, p1 - p0), d12 = dot(p2 - p1, p2 - p1), d20 = dot(p0 - p2, p0 - p2);\n"
+       "  int c = d01 >= d12 && d01 >= d20 ? 2 : (d12 >= d20 ? 0 : 1);\n"
+       "  int a = c == 2 ? 0 : c + 1, b = c == 0 ? 2 : (c == 1 ? 0 : 1);\n"
+       "  Copiar(c);\n  Copiar(a);\n  Copiar(b);\n  Cuarto(a, b, c);\n  EndPrimitive();\n}\n";
+  return g;
+}
+
 namespace gr = rex::graphics;
 namespace xenos = rex::graphics::xenos;
 using deko::ContextoSalidaDeko3d;
@@ -354,6 +385,13 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   }
   if (!fs_vacio_valido_) {
     REXLOG_ERROR("[deko3d] no se pudo compilar el pixel shader vacio: {}", vacio.log);
+  }
+  const deko::Compilador::Resultado rect = compilador_.Compilar(deko::Compilador::Etapa::kGeometria, GlslRectangulos());
+  if (rect.ok) {
+    gs_rectangulos_valido_ = nucleo_.CargarShader(gs_rectangulos_, rect.dksh, "rectangulos");
+  }
+  if (!gs_rectangulos_valido_) {
+    REXLOG_ERROR("[deko3d] no se pudo compilar el geometry shader de rectangulos: {}", rect.log);
   }
   CrearShadersSalida();
   AsegurarTrabajo();
@@ -927,10 +965,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
     uint32_t base_resuelta = 0;
     if ((info_destino >> 3) & 0x1) {
       Rechazar(3, "copia a textura 3D o array: todavia no");
-    } else if (formato_destino != uint32_t(xenos::ColorFormat::k_8_8_8_8) &&
-               formato_destino != uint32_t(xenos::ColorFormat::k_8_8_8_8_A) &&
-               formato_destino != uint32_t(xenos::ColorFormat::k_8_8_8_8_AS_16_16_16_16)) {
-      Rechazar(200 + formato_destino, "formato de copia todavia no soportado");
+    } else if (!CopiaComoRgba8(formato_destino)) {
+      Rechazar(300 + formato_destino, "formato de copia todavia no soportado");
     } else {
       const uint32_t pitch_destino = reg.rb_copy_dest_pitch & 0x3FFF;
       const uint32_t alto_destino = (reg.rb_copy_dest_pitch >> 16) & 0x3FFF;
@@ -1873,7 +1909,7 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
     }
   }
   if (!origen) {
-    Rechazar(4, "Swap sin textura resuelta");
+    Rechazar(14, "Swap sin textura resuelta");
   } else if (presentador) {
     const uint32_t w = std::min(ancho ? ancho : ancho_origen, ancho_origen);
     const uint32_t h = std::min(alto ? alto : alto_origen, alto_origen);

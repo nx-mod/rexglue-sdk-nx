@@ -834,6 +834,7 @@ void RenderDk::EmitirCieloPendiente() {
   g_.valido = false;
   g_.vs = e.vs;
   g_.ps = e.ps;
+  g_.gs = nullptr;
   std::copy(std::begin(e.ubo), std::end(e.ubo), std::begin(g_.ubo));
 }
 
@@ -1103,7 +1104,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
   DkPrimitive primitiva;
   bool admite_reinicio = false;
+  bool rectangulos = false;  // drawn as triangles that gs_rectangulos_ completes
   switch (tipo) {
+    case 1:
+      primitiva = DkPrimitive_Points;
+      break;
     case 2:
       primitiva = DkPrimitive_Lines;
       break;
@@ -1122,11 +1127,18 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       primitiva = DkPrimitive_TriangleStrip;
       admite_reinicio = true;
       break;
+    case 8:  // rectangle list: three corners each, the fourth made by the geometry shader
+      if (!gs_rectangulos_valido_) {
+        return Rechazar(408, "lista de rectangulos sin el geometry shader");
+      }
+      primitiva = DkPrimitive_Triangles;
+      rectangulos = true;
+      break;
     case 13:
       primitiva = DkPrimitive_Quads;  // native (the Vulkan backend makes triangle lists of them)
       break;
     default:
-      return Rechazar(100 + tipo, "tipo de primitiva todavia no soportado");
+      return Rechazar(400 + tipo, "tipo de primitiva todavia no soportado");
   }
   if (fuente == uint32_t(xenos::SourceSelect::kImmediate)) {
     return Rechazar(2, "indices inmediatos");
@@ -1753,11 +1765,14 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     return Rechazar(60, "shader sin DKSH");
   }
   nucleo_.InvalidarCodigoSiHaceFalta();  // code copied in the middle of a frame (rex/ui/deko3d/nucleo.h)
-  if (vs != g_.vs || fs != g_.ps) {
-    const DkShader* shaders[2] = {vs, fs};
-    dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
+  const DkShader* gs = rectangulos ? &gs_rectangulos_ : nullptr;
+  if (vs != g_.vs || fs != g_.ps || gs != g_.gs) {
+    // A stage in the mask with no shader in the list is unbound: the geometry shader only when it is given.
+    const DkShader* shaders[3] = {vs, fs, gs};
+    dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, gs ? 3 : 2);
     g_.vs = vs;
     g_.ps = fs;
+    g_.gs = gs;
   }
 
   // --- Fixed state, each block only when it changes

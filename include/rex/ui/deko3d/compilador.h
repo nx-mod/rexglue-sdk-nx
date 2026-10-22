@@ -23,6 +23,7 @@ class Compilador {
     std::string log;  // uam's lines; may be set when ok
   };
   using Hecho = std::function<void(Resultado)>;
+  enum class Etapa { kVertices, kGeometria, kFragmentos };
 
   // Starts the thread. Ends the process if it cannot be created.
   Compilador();
@@ -33,8 +34,10 @@ class Compilador {
 
   // GLSL to DKSH, waiting for the result (the presenter's own shaders, at start).
   Resultado Compilar(bool vertices, std::string glsl);
+  Resultado Compilar(Etapa etapa, std::string glsl);
   // The same without waiting: `hecho` runs on the worker thread.
   void Encolar(bool vertices, std::string glsl, Hecho hecho);
+  void Encolar(Etapa etapa, std::string glsl, Hecho hecho);
   // Compiles waiting or queued and not finished.
   uint32_t Pendientes() const;
 

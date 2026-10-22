@@ -34,7 +34,7 @@ void main() {
 
 struct Compilador::Datos {
   struct Tarea {
-    bool vertices;
+    Etapa etapa;
     std::string glsl;
     Hecho hecho;
   };
@@ -69,7 +69,10 @@ struct Compilador::Datos {
         tarea = std::move(cola.front());
         cola.pop_front();
       }
-      uam::Result r = uam::compile(tarea.vertices ? uam::Stage::Vertex : uam::Stage::Fragment, tarea.glsl.c_str());
+      const uam::Stage etapa = tarea.etapa == Etapa::kVertices    ? uam::Stage::Vertex
+                               : tarea.etapa == Etapa::kGeometria ? uam::Stage::Geometry
+                                                                  : uam::Stage::Fragment;
+      uam::Result r = uam::compile(etapa, tarea.glsl.c_str());
       tarea.hecho(Resultado{r.ok, std::move(r.dksh), std::move(r.log)});
       std::lock_guard<std::mutex> cerrojo(candado);
       --pendientes;
@@ -96,18 +99,26 @@ Compilador::~Compilador() {
 }
 
 void Compilador::Encolar(bool vertices, std::string glsl, Hecho hecho) {
+  Encolar(vertices ? Etapa::kVertices : Etapa::kFragmentos, std::move(glsl), std::move(hecho));
+}
+
+void Compilador::Encolar(Etapa etapa, std::string glsl, Hecho hecho) {
   {
     std::lock_guard<std::mutex> cerrojo(datos_->candado);
-    datos_->cola.push_back({vertices, std::move(glsl), std::move(hecho)});
+    datos_->cola.push_back({etapa, std::move(glsl), std::move(hecho)});
     ++datos_->pendientes;
   }
   datos_->hay_trabajo.notify_one();
 }
 
 Compilador::Resultado Compilador::Compilar(bool vertices, std::string glsl) {
+  return Compilar(vertices ? Etapa::kVertices : Etapa::kFragmentos, std::move(glsl));
+}
+
+Compilador::Resultado Compilador::Compilar(Etapa etapa, std::string glsl) {
   std::promise<Resultado> promesa;
   std::future<Resultado> futuro = promesa.get_future();
-  Encolar(vertices, std::move(glsl), [&promesa](Resultado r) { promesa.set_value(std::move(r)); });
+  Encolar(etapa, std::move(glsl), [&promesa](Resultado r) { promesa.set_value(std::move(r)); });
   return futuro.get();
 }
 

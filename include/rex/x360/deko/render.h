@@ -523,6 +523,9 @@ class RenderDk final : public DestinosNativos {
   std::unordered_map<uint64_t, bool> en_fondo_;  // keys queued (by a hash of the key)
   DkShader fs_vacio_{};
   bool fs_vacio_valido_ = false;
+  // Rectangle lists (primitive 8): each triangle of three corners becomes a strip of four (destinos.cpp).
+  DkShader gs_rectangulos_{};
+  bool gs_rectangulos_valido_ = false;
 
   // Vertex input (the same VS with the same patched fetches gives the same input)
   std::unordered_map<uint64_t, std::unique_ptr<EntradaVerticesDk>> entradas_;
@@ -539,6 +542,7 @@ class RenderDk final : public DestinosNativos {
     uint64_t pase_serie = 0;  // goes up at every pass change (the framing cache depends on it)
     const DkShader* vs = nullptr;
     const DkShader* ps = nullptr;
+    const DkShader* gs = nullptr;  // gs_rectangulos_ or none
     DkRasterizerState raster{};
     DkColorState color{};
     DkColorWriteState mascaras{};
