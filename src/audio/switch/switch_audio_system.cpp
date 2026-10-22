@@ -13,7 +13,9 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
@@ -38,6 +40,15 @@ REXCVAR_DEFINE_INT32(audio_switch_tramas_en_cola, 10, "Audio",
                      "(colchon; 10 = 53 ms, 6 hasta la build 105). Mas cola deja esperar al juego sin cortar la "
                      "salida, a cambio de latencia: nfsmw_audio_esperar_servidor_ms espera hasta 30 ms; se lee "
                      "al abrir el audio");
+
+REXCVAR_DEFINE_INT32(audio_volcado_inicio_s, 0, "Audio",
+                     "Pruebas: a partir de este segundo de audio, guarda en logs/rex/audio_volcado.wav lo que sale "
+                     "por audout (audio_volcado_duracion_s segundos) y en audio_volcado.txt los huecos; 0 = nunca")
+    .range(0, 3600);
+REXCVAR_DEFINE_INT32(audio_volcado_duracion_s, 10, "Audio", "Pruebas: segundos de audio_volcado_inicio_s")
+    .range(1, 60);
+
+extern "C" const char* RexSwitchLogDir(void);
 
 namespace rex::audio::nx {
 
@@ -157,6 +168,11 @@ struct SwitchAudioSystem::Output {
   std::array<AudioOutBuffer, kBufferCount> buffers{};
   std::array<s16*, kBufferCount> samples{};
   std::array<float, kBufferSamples * 2> mix{};
+  // audio_volcado_inicio_s: buffers appended so far, and the recording (stereo s16) with its gaps.
+  uint64_t buffers_appended = 0;
+  std::vector<s16> volcado;
+  std::string huecos;
+  bool volcado_hecho = false;
 };
 
 std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
@@ -334,6 +350,7 @@ void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
   RexSwitchPerfAdd(21, saturadas);
   RexSwitchPerfAdd(22, pico >= 0.98f ? 1 : 0);
   RexSwitchPerfMax(23, static_cast<u64>(std::min(pico, 100.0f) * 10000.0f));
+  Volcar(samples, frames_missing);
   output.buffers[buffer_index].data_size = kBufferBytes;
   output.buffers[buffer_index].data_offset = 0;
   Result rc = audoutAppendAudioOutBuffer(&output.buffers[buffer_index]);
@@ -346,6 +363,51 @@ void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
   if (R_FAILED(rc)) {
     REXLOG_ERROR("SwitchAudioSystem: audoutAppendAudioOutBuffer failed: 0x{:08X}", rc);
   }
+}
+
+// Testing (audio_volcado_inicio_s): what goes out, as a WAV, and the buffers that had a guest frame missing (each
+// 5.33 ms of silence), to find what makes the crackle. Written once, from this thread, when the recording is full.
+void SwitchAudioSystem::Volcar(const int16_t* samples, uint32_t frames_missing) {
+  Output& output = *output_;
+  const uint64_t n = output.buffers_appended++;
+  static const int inicio_s = REXCVAR_GET(audio_volcado_inicio_s);
+  static const int duracion_s = REXCVAR_GET(audio_volcado_duracion_s);
+  if (!inicio_s || output.volcado_hecho) {
+    return;
+  }
+  const uint64_t primero = uint64_t(inicio_s) * 48000 / kBufferSamples;
+  const uint64_t cuantos = uint64_t(duracion_s) * 48000 / kBufferSamples;
+  if (n < primero) {
+    return;
+  }
+  if (frames_missing) {
+    char linea[96];
+    std::snprintf(linea, sizeof(linea), "bufer %llu (muestra %llu): %u tramas sin datos\n",
+                  (unsigned long long)(n - primero), (unsigned long long)((n - primero) * kBufferSamples),
+                  frames_missing);
+    output.huecos += linea;
+  }
+  output.volcado.insert(output.volcado.end(), samples, samples + kBufferSamples * 2);
+  if (n + 1 < primero + cuantos) {
+    return;
+  }
+  output.volcado_hecho = true;
+  const std::string base = std::string(RexSwitchLogDir()) + "audio_volcado";
+  if (FILE* f = std::fopen((base + ".wav").c_str(), "wb")) {
+    const uint32_t datos = uint32_t(output.volcado.size() * sizeof(s16));
+    const uint32_t cabecera[] = {0x46464952u, 36 + datos, 0x45564157u, 0x20746D66u, 16, 0x00020001u, 48000,
+                                 48000 * 4, 0x00100004u, 0x61746164u, datos};  // RIFF/WAVE, PCM 2 ch 16 bits
+    std::fwrite(cabecera, sizeof(cabecera), 1, f);
+    std::fwrite(output.volcado.data(), sizeof(s16), output.volcado.size(), f);
+    std::fclose(f);
+  }
+  if (FILE* f = std::fopen((base + ".txt").c_str(), "wb")) {
+    std::fputs(output.huecos.empty() ? "sin huecos\n" : output.huecos.c_str(), f);
+    std::fclose(f);
+  }
+  std::fprintf(stderr, "[audio] volcado: %s.wav (%d s desde el segundo %d)\n", base.c_str(), duracion_s, inicio_s);
+  output.volcado.clear();
+  output.volcado.shrink_to_fit();
 }
 
 void SwitchAudioSystem::PumpTick() {

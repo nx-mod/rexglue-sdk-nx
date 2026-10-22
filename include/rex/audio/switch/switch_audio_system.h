@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -76,6 +77,7 @@ class SwitchAudioSystem final : public AudioSystem {
   void StopOutput();
   void OutputThreadMain();
   void FillAndAppend(size_t buffer_index);
+  void Volcar(const int16_t* samples, uint32_t frames_missing);  // audio_volcado_inicio_s (testing)
   void PumpTick();
 
   std::unique_ptr<Output> output_;
