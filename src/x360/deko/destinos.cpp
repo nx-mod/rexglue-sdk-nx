@@ -794,6 +794,29 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
   return &nueva;
 }
 
+// Predicated tiling (Halo 3): the frame is drawn in bands of EDRAM and each band is resolved into its rows of one
+// texture, with the destination base moved down to the band and the height left below it as the destination height
+// (640, then 480, 320, 160). A base a whole number of 32-row tile rows below a texture resolved from its top, of the
+// same width and kind, whose rows down plus that height make its height, is that texture at those rows: `base` becomes
+// the texture's base and `filas` the rows down. nullptr if there is none.
+RenderDk::Resuelta* RenderDk::BandaDe(uint32_t& base, uint32_t ancho, uint32_t alto_destino, uint32_t pitch,
+                                      bool profundidad, uint32_t& filas) {
+  const uint64_t fila_baldosas = uint64_t((pitch + 31) / 32) * 4096;  // 32 rows of 4-byte texels
+  for (auto& [b, r] : resueltas_) {
+    if (b >= base || r.imagen.profundidad != profundidad || r.imagen.ancho != ancho) {
+      continue;
+    }
+    const uint64_t d = base - b;
+    if (d % fila_baldosas == 0 && (d / fila_baldosas) * 32 + alto_destino == r.imagen.alto) {
+      filas = uint32_t(d / fila_baldosas) * 32;
+      base = b;
+      ++bandas_resueltas_;
+      return &r;
+    }
+  }
+  return nullptr;
+}
+
 RenderDk::Resuelta* RenderDk::ObtenerResuelta(uint32_t base, uint32_t ancho, uint32_t alto, uint32_t formato,
                                               bool intercambio_rb, bool profundidad) {
   if (!ancho || !alto) {
@@ -1055,23 +1078,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       const uint32_t ancho_resolve = uint32_t(x1 - x0);
       const uint32_t ancho_textura =
           x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
-      // Predicated tiling (Halo 3): the frame is drawn in bands of EDRAM and each band is resolved into its rows of one
-      // texture, with the destination base moved down to the band and the height left below it as the destination
-      // height (640, then 480, 320, 160). A base a whole number of 32-row tile rows below a texture resolved from its
-      // top, of the same width, whose rows down plus that height make its height, is that texture at those rows.
-      const uint64_t fila_baldosas = uint64_t((pitch_destino + 31) / 32) * 4096;  // 32 rows of 4-byte texels
-      for (auto& [b, r] : resueltas_) {
-        if (b >= base_resuelta || r.imagen.profundidad || r.imagen.ancho != ancho_textura) {
-          continue;
-        }
-        const uint64_t d = base_resuelta - b;
-        if (d % fila_baldosas == 0 && (d / fila_baldosas) * 32 + alto_destino == r.imagen.alto) {
-          dy += uint32_t(d / fila_baldosas) * 32;
-          base_resuelta = b;
-          resuelta = &r;
-          ++bandas_resueltas_;
-          break;
-        }
+      uint32_t filas_banda = 0;
+      if ((resuelta = BandaDe(base_resuelta, ancho_textura, alto_destino, pitch_destino, false, filas_banda))) {
+        dy += filas_banda;  // base_resuelta is now the texture's own
       }
       if (!resuelta) {
         resuelta = ObtenerResuelta(base & 0x1FFFFFFF, ancho_textura, alto_destino, formato_destino,
@@ -1377,13 +1386,19 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
       (reg.rb_copy_dest_base + uint32_t(DesplazamientoMosaico2D(int32_t(base_x), int32_t(base_y), pitch_destino, 2))) &
       0x1FFFFFFF;
   const uint32_t dx = uint32_t(x0) - base_x;
-  const uint32_t dy = uint32_t(y0) - base_y;
+  uint32_t dy = uint32_t(y0) - base_y;
   const uint32_t formato_textura = ((info >> 16) & 0x1) ? 23 : 22;  // k_24_8_FLOAT : k_24_8
   // Its width as for color (the pitch is padded to 32 texels; see Copiar).
   const uint32_t ancho_resolve = uint32_t(x1 - x0);
   const uint32_t ancho_textura =
       x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
-  Resuelta* resuelta = ObtenerResuelta(base, ancho_textura, alto_destino, formato_textura, false, true);
+  uint32_t base_textura = base, filas_banda = 0;
+  Resuelta* resuelta = BandaDe(base_textura, ancho_textura, alto_destino, pitch_destino, true, filas_banda);
+  if (resuelta) {
+    dy += filas_banda;
+  } else {
+    resuelta = ObtenerResuelta(base, ancho_textura, alto_destino, formato_textura, false, true);
+  }
   if (!resuelta) {
     return;
   }

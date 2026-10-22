@@ -230,6 +230,8 @@ class RenderDk final : public DestinosNativos {
   };
   Resuelta* ObtenerResuelta(uint32_t base, uint32_t ancho, uint32_t alto, uint32_t formato, bool intercambio_rb,
                             bool profundidad);
+  Resuelta* BandaDe(uint32_t& base, uint32_t ancho, uint32_t alto_destino, uint32_t pitch, bool profundidad,
+                    uint32_t& filas);
   bool CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat formato, uint32_t ancho, uint32_t alto,
                    uint32_t capas, uint32_t niveles, uint32_t flags, const char* que);
   void DestruirImagen(ImagenDk& imagen);
