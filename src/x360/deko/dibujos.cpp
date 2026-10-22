@@ -95,6 +95,10 @@ REXCVAR_DECLARE(bool, nfsmw_dk_perfil_barrera);
 REXCVAR_DECLARE(bool, nfsmw_dk_perfil_variantes);
 REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
 // deko3d only.
+REXCVAR_DEFINE_BOOL(deko_diagnostico_magenta, false, "deko3d",
+                    "Testing: every pixel shader writes opaque magenta to all its outputs, to see where the geometry "
+                    "lands whatever the shading does")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_compilar_solo_en_fondo, false, "deko3d",
                     "deko3d: no shader is compiled on the spot; a draw whose shader is not in the DKSH cache is skipped "
                     "while the worker compiles it (Halo 3, with no offline cache)")
@@ -871,6 +875,27 @@ void RenderDk::CerrarFotogramaDeLaGuardiaDelCielo() {
 
 // ---- Shaders
 
+// deko_diagnostico_magenta: main becomes xeno_main_original, and a new main runs it and then writes opaque magenta to
+// every `layout(location = N) out vec4` the text declares (SPIRV-Cross's and the translator's alike).
+static void PintarMagenta(std::string& glsl) {
+  const size_t m = glsl.find("void main()");
+  if (m == std::string::npos) {
+    return;
+  }
+  std::string salidas;
+  for (size_t at = glsl.find("layout(location = "); at != std::string::npos; at = glsl.find("layout(location = ", at + 1)) {
+    const size_t fin = glsl.find(';', at);
+    const size_t out = glsl.find(") out ", at);
+    if (fin == std::string::npos || out == std::string::npos || out > fin) {
+      continue;
+    }
+    const size_t nombre = glsl.rfind(' ', fin) + 1;
+    salidas += "  " + glsl.substr(nombre, fin - nombre) + " = vec4(1.0, 0.0, 1.0, 1.0);\n";
+  }
+  glsl.replace(m, 11, "void xeno_main_original()");
+  glsl += "\nvoid main() {\n  xeno_main_original();\n" + salidas + "}\n";
+}
+
 RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
   InfoShader& info = info_shaders_[&entrada];
   if (!entrada.glsl.empty()) {
@@ -926,14 +951,22 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
   // The translator's GLSL keeps every vertex shader output (GlslDeTraductor): one variant.
   const bool de_texto = !entrada.glsl.empty();
   const uint32_t variante = entrada.vertices ? (de_texto ? kTodasLasSalidas : salidas) : variante_ps;
+  static const bool magenta = REXCVAR_GET(deko_diagnostico_magenta);
   auto a_glsl = [&](std::span<const uint32_t> spv, uint32_t v) {
-    return de_texto ? deko::GlslDeTraductor(entrada.glsl, entrada.vertices, espec) : deko::SpirvAGlsl(spv, espec, v);
+    deko::GlslDeko g =
+        de_texto ? deko::GlslDeTraductor(entrada.glsl, entrada.vertices, espec) : deko::SpirvAGlsl(spv, espec, v);
+    if (magenta && !entrada.vertices) {
+      PintarMagenta(g.glsl);
+    }
+    return g;
   };
   const ClaveCargado clave{&entrada, espec, variante};
   if (const auto it = cargados_.find(clave); it != cargados_.end()) {
     return it->second.get();
   }
-  const deko::CacheDksh::Clave clave_cache{info.huella, espec, variante};
+  // The magenta diagnostic compiles other code: another key, so the cache never mixes the two.
+  const deko::CacheDksh::Clave clave_cache{magenta && !entrada.vertices ? info.huella ^ 0xD1A6D1A6D1A6D1A6ull : info.huella,
+                                           espec, variante};
   char nombre[64];
   std::snprintf(nombre, sizeof(nombre), "%s n%u %08X %08X", entrada.vertices ? "VS" : "PS", entrada.numero, espec,
                 variante);
