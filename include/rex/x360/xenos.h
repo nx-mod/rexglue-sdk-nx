@@ -75,8 +75,8 @@ inline bool DestinoComoRgba8(uint32_t formato) {
 // Copy (resolve) destination formats (ColorFormat) stored as an RGBA8 host texture: 8_8_8_8 (6, 14, 50), and for now
 // 2_10_10_10 (7, 54), Halo 3's frontbuffer, and 16_16_16_16 and its float (26, 32), with the same loss.
 inline bool CopiaComoRgba8(uint32_t formato) {
-  return formato == 6 || formato == 14 || formato == 50 || formato == 7 || formato == 54 || formato == 25 ||
-         formato == 26 || formato == 31 || formato == 32;
+  return formato == 6 || formato == 14 || formato == 50 || formato == 7 || formato == 54 || formato == 26 ||
+         formato == 32;
 }
 
 // Formats whose values leave 0..1, held as RGBA16F on the host instead of RGBA8: the 64-bit render targets
