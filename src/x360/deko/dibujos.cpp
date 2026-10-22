@@ -2284,8 +2284,15 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
           }
         }
       }
+      // Where it draws: each color target's EDRAM base and format, and the depth one.
+      for (uint32_t i = 0; i < 5; ++i) {
+        if (claves[i]) {
+          linea += fmt::format(" {}{}={:03X}/f{}", i < 4 ? "rt" : "z", i < 4 ? i : 0u,
+                               uint32_t(claves[i] >> 24) & 0xFFF, uint32_t(claves[i] >> 16) & 0xF);
+        }
+      }
       volcado_dibujos_.push_back(std::move(linea));
-      if (volcado_dibujos_.size() > 300) {
+      if (volcado_dibujos_.size() > 2500) {
         volcado_dibujos_.pop_front();
       }
     }

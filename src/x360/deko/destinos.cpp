@@ -988,6 +988,11 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   const bool copiar =
       comando == uint32_t(xenos::CopyCommand::kRaw) || comando == uint32_t(xenos::CopyCommand::kConvert);
   const uint32_t pitch = reg.rb_surface_info & 0x3FFF;
+  if (origen >= xenos::kMaxColorRenderTargets && volcando_captura_) {
+    volcado_dibujos_.push_back(fmt::format("  c copia de profundidad {:03X} pitch {} -> {:08X} | copiar {} borrar z {} valor {:08X}",
+                                           reg.rb_depth_info & 0xFFF, pitch, reg.rb_copy_dest_base, comando,
+                                           (control >> 9) & 1, reg.rb_depth_clear));
+  }
   if (origen >= xenos::kMaxColorRenderTargets) {
     // From depth (IsClearingColor: a depth source clears no color).
     if (copiar) {
@@ -1000,6 +1005,15 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   }
   const uint32_t info_color = reg.rb_color_info[origen];
   const uint32_t formato_color = (info_color >> 16) & 0xF;
+  if (volcando_captura_) {  // the capture's draw list also shows the copies, in order
+    volcado_dibujos_.push_back(fmt::format(
+        "  c copia de {:03X}/f{} pitch {} -> {:08X} f{} pitch {} | copiar {} borrar color {} z {} valor {:08X}",
+        info_color & 0xFFF, formato_color, pitch, reg.rb_copy_dest_base, (reg.rb_copy_dest_info >> 7) & 0x3F,
+        reg.rb_copy_dest_pitch & 0x3FFF, comando, (control >> 8) & 1, (control >> 9) & 1, reg.rb_color_clear));
+    if (volcado_dibujos_.size() > 2500) {
+      volcado_dibujos_.pop_front();
+    }
+  }
   if (!DestinoComoRgba8(formato_color)) {
     return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
   }
