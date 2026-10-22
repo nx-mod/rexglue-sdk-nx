@@ -143,12 +143,15 @@ bool RenderDk::FormatoDe(uint32_t formato, FormatoDk& f) {
     case 26:  // k_16_16_16_16
       f = {DkImageFormat_RGBA16_Unorm, 1, 8, 2, kSwizzleRGBA};
       return true;
+    case 27:  // k_16_EXPAND: 16-bit floats, as Xenia reads the _EXPAND formats
     case 30:  // k_16_FLOAT
       f = {DkImageFormat_R16_Float, 1, 2, 2, kSwizzleRRRR};
       return true;
+    case 28:  // k_16_16_EXPAND
     case 31:  // k_16_16_FLOAT
       f = {DkImageFormat_RG16_Float, 1, 4, 2, kSwizzleRGGG};
       return true;
+    case 29:  // k_16_16_16_16_EXPAND
     case 32:  // k_16_16_16_16_FLOAT
       f = {DkImageFormat_RGBA16_Float, 1, 8, 2, kSwizzleRGBA};
       return true;
