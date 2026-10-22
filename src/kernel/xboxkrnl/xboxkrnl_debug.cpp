@@ -12,6 +12,9 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <cstdio>
+
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
@@ -21,6 +24,10 @@
 #include <rex/system/xexception.h>
 #include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
+
+REXCVAR_DEFINE_STRING(switch_hilos_audio_juego, "", "Kernel",
+                      "Switch: guest threads (names the game gives them, comma-separated) raised above the other "
+                      "game threads so its audio is fed in time");
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -37,6 +44,26 @@ typedef struct {
   rex::be<uint32_t> flags;
 } X_THREADNAME_INFO;
 static_assert_size(X_THREADNAME_INFO, 0x10);
+
+#if REX_PLATFORM_SWITCH
+// Horizon time-slices only priority 0x3B, where every guest thread runs (xthread.cpp, SwitchPriorityFor), so a
+// game's audio thread waits behind the ones that spin and the console's audio requests go unfilled: static (Halo 3
+// filled 421 of 1,880 in 10 s). The guest threads named here go one step above them, 0x3A, and preempt them. That
+// band is not time-sliced: a thread there that spins instead of waiting would keep a core. Comma-separated, exact.
+void RaiseIfAudioThread(XThread& thread, const std::string& name) {
+  const std::string list = REXCVAR_GET(switch_hilos_audio_juego);
+  size_t start = 0;
+  while (start <= list.size()) {
+    const size_t end = std::min(list.find(',', start), list.size());
+    if (end > start && list.compare(start, end - start, name) == 0 && thread.thread()) {
+      thread.thread()->set_priority(0x3A);
+      std::fprintf(stderr, "[hilos] %s sube a la prioridad 0x3A (switch_hilos_audio_juego)\n", name.c_str());
+      return;
+    }
+    start = end + 1;
+  }
+}
+#endif
 
 void HandleSetThreadName(ppc_ptr_t<X_EXCEPTION_RECORD> record) {
   // SetThreadName. FFS.
@@ -74,6 +101,9 @@ void HandleSetThreadName(ppc_ptr_t<X_EXCEPTION_RECORD> record) {
   if (thread) {
     REXKRNL_DEBUG("SetThreadName({}, {})", thread->thread_id(), name);
     thread->set_name(name);
+#if REX_PLATFORM_SWITCH
+    RaiseIfAudioThread(*thread, name);
+#endif
   }
 
   // TODO(benvanik): unwinding required here?
