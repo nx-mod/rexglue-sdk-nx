@@ -9,6 +9,10 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
@@ -46,6 +50,30 @@ REXCVAR_DEFINE_BOOL(audio_diag_prioridad_critica, false, "Audio",
 // implementations. They can be found in xboxkrnl_audio_xma.cc
 
 namespace rex::audio {
+
+namespace {
+// How long the game's audio callback takes, to stderr every 10 s: the console asks for a frame every 5.33 ms, so a
+// callback that takes longer (waiting on the game, for one) is a frame that arrives late or not at all.
+void MedirLlamada(std::chrono::steady_clock::duration d) {
+  using namespace std::chrono;
+  static uint64_t llamadas = 0, total_us = 0, maximo_us = 0, largas = 0;
+  static steady_clock::time_point inicio = steady_clock::now();
+  const uint64_t us = uint64_t(duration_cast<microseconds>(d).count());
+  ++llamadas;
+  total_us += us;
+  maximo_us = std::max(maximo_us, us);
+  largas += us > 5333 ? 1 : 0;
+  const auto ahora = steady_clock::now();
+  if (ahora - inicio >= seconds(10)) {
+    std::fprintf(stderr, "[audio] 10 s: %llu llamadas al juego, media %llu us, maxima %.1f ms, %llu de mas de 5,3 ms\n",
+                 (unsigned long long)llamadas, (unsigned long long)(llamadas ? total_us / llamadas : 0),
+                 double(maximo_us) / 1000.0, (unsigned long long)largas);
+    llamadas = total_us = maximo_us = largas = 0;
+    inicio = ahora;
+  }
+}
+}  // namespace
+
 
 namespace {
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
@@ -166,8 +194,10 @@ void AudioSystem::WorkerThreadMain() {
         }
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
         uint64_t args[] = {client_callback_arg};
+        const auto antes = std::chrono::steady_clock::now();
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
+        MedirLlamada(std::chrono::steady_clock::now() - antes);
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
         }

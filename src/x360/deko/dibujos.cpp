@@ -95,6 +95,10 @@ REXCVAR_DECLARE(bool, nfsmw_dk_perfil_barrera);
 REXCVAR_DECLARE(bool, nfsmw_dk_perfil_variantes);
 REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
 // deko3d only.
+REXCVAR_DEFINE_BOOL(deko_compilar_solo_en_fondo, false, "deko3d",
+                    "deko3d: no shader is compiled on the spot; a draw whose shader is not in the DKSH cache is skipped "
+                    "while the worker compiles it (Halo 3, with no offline cache)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nfsmw_dk_compilar_en_fondo, true, "NFSMW",
                     "deko3d: la variante exacta de un vertex shader que no esta en la cache se compila en segundo "
                     "plano; mientras, dibuja la que conserva todos los interpoladores. false = se compila en el acto")
@@ -1012,13 +1016,15 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     }
     return ShaderDe(entrada, especializacion, salidas, 0);
   }
-  if (de_texto && en_fondo) {
-    // Translated at run time (the game's GLSL): compiled on the worker while the draw is skipped, as Xenia does,
-    // instead of holding the ring thread (a translated vertex shader takes uam 0.3-2.5 s on the console). The next
-    // draws find it in the cache once RecogerCompilaciones has added it; one that fails stays skipped (logged there).
+  static const bool solo_en_fondo = REXCVAR_GET(deko_compilar_solo_en_fondo);
+  if ((de_texto || solo_en_fondo) && en_fondo) {
+    // Translated at run time (the game's GLSL), or every shader with deko_compilar_solo_en_fondo: compiled on the
+    // worker while the draw is skipped, as Xenia does, instead of holding the ring thread (a translated vertex shader
+    // takes uam 0.3-2.5 s on the console, and a compile on the spot also waits for the whole queue ahead of it). The
+    // next draws find it in the cache once RecogerCompilaciones has added it; one that fails stays skipped.
     const uint64_t h = XXH3_64bits(&clave_cache, sizeof(clave_cache));
     if (en_fondo_.emplace(h, true).second) {
-      deko::GlslDeko g = a_glsl(espirv, kTodasLasSalidas);
+      deko::GlslDeko g = a_glsl(espirv, entrada.vertices ? variante : kTodasLasSalidas);
       if (!entrada.vertices && (variante_ps & kVarianteZTemprana)) {
         DeclararZTemprana(g.glsl);
       }
