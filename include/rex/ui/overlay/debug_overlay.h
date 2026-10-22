@@ -24,6 +24,10 @@ struct FrameStats {
   uint64_t frame_count = 0;
 };
 
+// The overlay's "Guest: N FPS (ms)" from a game's frame counter (its presents): sampled at most once a second and
+// averaged with the previous window, as NFS's MuestreaFotograma. `total` is read on the UI thread.
+FrameStats MuestrearFotogramas(uint64_t total);
+
 // true while the debug overlay exists. On Switch, with it open, L+R and the right stick move it, and
 // the input driver does not pass L, R or that stick to the game while L and R are held.
 bool DebugOverlayAbierto();

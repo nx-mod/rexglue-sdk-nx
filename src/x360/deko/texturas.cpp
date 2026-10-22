@@ -85,6 +85,31 @@ void Swizzle(uint32_t swizzle_guest, uint16_t swizzle_host, DkImageSwizzle salid
   }
 }
 
+// k_CTX1, as Xenia's ConvertTexelCTX1ToR8G8: each 8-byte block (in host order) is two 8:8 endpoints r0 g0 r1 g1 and
+// 32 bits of 2-bit indices, texel (x, y) at bits 2 * (x + 4 * y); the palette is c0, c1, 2/3 c0 + 1/3 c1 and
+// 1/3 c0 + 2/3 c1. `ancho` x `alto` texels of RG8 out, from bx x by blocks.
+void DecodificarCtx1(const uint8_t* bloques, uint32_t bx, uint32_t by, uint32_t ancho, uint32_t alto, uint8_t* rg) {
+  for (uint32_t j = 0; j < by; ++j) {
+    for (uint32_t i = 0; i < bx; ++i) {
+      const uint8_t* b = bloques + (size_t(j) * bx + i) * 8;
+      uint32_t indices;
+      std::memcpy(&indices, b + 4, 4);
+      const uint8_t r[4] = {b[0], b[2], uint8_t((2 * b[0] + b[2]) / 3), uint8_t((b[0] + 2 * b[2]) / 3)};
+      const uint8_t g[4] = {b[1], b[3], uint8_t((2 * b[1] + b[3]) / 3), uint8_t((b[1] + 2 * b[3]) / 3)};
+      for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
+          const uint32_t px = i * 4 + x, py = j * 4 + y;
+          if (px >= ancho || py >= alto) continue;
+          const uint32_t k = (indices >> ((x + 4 * y) * 2)) & 0x3;
+          uint8_t* d = rg + (size_t(py) * ancho + px) * 2;
+          d[0] = r[k];
+          d[1] = g[k];
+        }
+      }
+    }
+  }
+}
+
 // The original untiling, block by block (when the block is not a power of two bytes, which no format here has).
 void LeerNivelMosaicoDeSiempre(const uint8_t* origen, uint32_t pitch_bloques, uint32_t log2, uint32_t bytes, uint32_t ox,
                                uint32_t oy, uint32_t bx, uint32_t by, uint32_t bx_host, uint8_t* destino) {
@@ -130,6 +155,9 @@ bool RenderDk::FormatoDe(uint32_t formato, FormatoDk& f) {
       return true;
     case 49:  // k_DXN
       f = {DkImageFormat_RG_BC5_Unorm, 4, 16, 2, kSwizzleRGGG};
+      return true;
+    case 60:  // k_CTX1: the 360's two-channel normal map blocks, no host format: RG8 decoded (DecodificarCtx1)
+      f = {DkImageFormat_RG8_Unorm, 4, 8, 2, kSwizzleRGGG, true};
       return true;
     case 59:  // k_DXT5A
       f = {DkImageFormat_R_BC4_Unorm, 4, 8, 2, kSwizzleRRRR};
@@ -812,6 +840,33 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   if (orden && (tf.unidad_orden == 2 || tf.unidad_orden == 4)) {
     CambiarOrdenBytes(temporal_.data(), temporal_.size(), tf.unidad_orden, orden);
   }
+  // k_CTX1: the untiled blocks become RG8 texels, and from here on the levels are plain 2-byte texels.
+  FormatoDk th = tf;
+  if (tf.ctx1) {
+    std::vector<uint8_t> texeles;
+    size_t total = 0;
+    std::array<size_t, 16> desplazamiento_rg{};
+    std::array<size_t, 16> bytes_capa_rg{};
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      desplazamiento_rg[n] = total;
+      bytes_capa_rg[n] = size_t(std::max(img.ancho >> n, 1u)) * std::max(img.alto >> n, 1u) * 2;
+      total += bytes_capa_rg[n] * capas;
+    }
+    texeles.assign(total, 0);
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      const uint32_t bx = (std::max(img.ancho >> n, 1u) + 3) / 4, by = (std::max(img.alto >> n, 1u) + 3) / 4;
+      for (uint32_t c = 0; c < capas; ++c) {
+        DecodificarCtx1(temporal_.data() + desplazamiento_nivel[n] + bytes_capa_nivel[n] * c, bx, by,
+                        std::max(img.ancho >> n, 1u), std::max(img.alto >> n, 1u),
+                        texeles.data() + desplazamiento_rg[n] + bytes_capa_rg[n] * c);
+      }
+    }
+    temporal_.swap(texeles);
+    bytes_datos = total;
+    desplazamiento_nivel = desplazamiento_rg;
+    th.bloque = 1;
+    th.bytes = 2;
+  }
   // To the upload ring (it may move on to the next slot: the copies and the descriptors go with the slot they were
   // recorded in, and this texture's draws come after).
   const deko::Subida subida = Reservar(uint32_t(bytes_datos), 256);
@@ -822,13 +877,13 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   std::memcpy(subida.cpu, temporal_.data(), bytes_datos);
   DkCmdBuf previos = nucleo_.ComandosPrevios();
   for (uint32_t n = 0; n < img.niveles; ++n) {
-    const uint32_t bx_host = (std::max(img.ancho >> n, 1u) + tf.bloque - 1) / tf.bloque;
-    const uint32_t by_host = (std::max(img.alto >> n, 1u) + tf.bloque - 1) / tf.bloque;
+    const uint32_t bx_host = (std::max(img.ancho >> n, 1u) + th.bloque - 1) / th.bloque;
+    const uint32_t by_host = (std::max(img.alto >> n, 1u) + th.bloque - 1) / th.bloque;
     DkImageView vista;
     dkImageViewDefaults(&vista, &img.imagen);
     vista.mipLevelOffset = uint8_t(n);
     // Layers (cube faces, 3D slices) by the rectangle's z; rows and layers in bytes of the upload.
-    const uint32_t fila = bx_host * tf.bytes;
+    const uint32_t fila = bx_host * th.bytes;
     const DkCopyBuf origen = {subida.gpu + desplazamiento_nivel[n], fila, fila * by_host};
     const DkImageRect rect = {0, 0, 0, std::max(img.ancho >> n, 1u), std::max(img.alto >> n, 1u),
                               volumen ? fondo : capas};

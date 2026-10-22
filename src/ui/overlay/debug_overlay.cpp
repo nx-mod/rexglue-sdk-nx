@@ -10,6 +10,8 @@
  *              See LICENSE file in the project root for full license text.
  */
 #include <rex/ui/overlay/debug_overlay.h>
+
+#include <chrono>
 #include <rex/platform.h>
 #include <rex/version.h>
 #include <imgui.h>
@@ -31,6 +33,41 @@ std::atomic<int> g_debug_overlays{0};
 }  // namespace
 
 bool DebugOverlayAbierto() { return g_debug_overlays.load(std::memory_order_relaxed) > 0; }
+
+FrameStats MuestrearFotogramas(uint64_t total) {
+  using Reloj = std::chrono::steady_clock;
+  static FrameStats stats;
+  static Reloj::time_point ultimo;
+  static uint64_t anteriores = 0;
+  static bool tiene_anterior = false;
+  static double suave_ms = 0.0;
+  const auto ahora = Reloj::now();
+  stats.frame_count = total > 0 ? total : 1;  // the overlay draws nothing while this is 0
+  if (!tiene_anterior) {
+    tiene_anterior = true;
+    ultimo = ahora;
+    anteriores = total;
+    return stats;
+  }
+  const double dt_ms = std::chrono::duration<double, std::milli>(ahora - ultimo).count();
+  if (dt_ms < 1000.0) {
+    return stats;
+  }
+  const uint64_t hechos = total - anteriores;
+  ultimo = ahora;
+  anteriores = total;
+  if (hechos == 0) {  // nothing presented in the whole window
+    suave_ms = 0.0;
+    stats.fps = 0.0;
+    stats.frame_time_ms = dt_ms;
+    return stats;
+  }
+  const double ms = dt_ms / double(hechos);
+  suave_ms = (suave_ms <= 0.0 || dt_ms > 5000.0) ? ms : (suave_ms + ms) * 0.5;
+  stats.frame_time_ms = suave_ms;
+  stats.fps = 1000.0 / suave_ms;
+  return stats;
+}
 
 DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
     : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {

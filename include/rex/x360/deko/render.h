@@ -394,6 +394,7 @@ class RenderDk final : public DestinosNativos {
     uint8_t bytes = 1;         // bytes per block
     uint8_t unidad_orden = 0;  // 0 = no byte swap, else 2 or 4 bytes
     uint16_t swizzle_host = 0;
+    bool ctx1 = false;  // k_CTX1: guest blocks of 4x4 (8 bytes), decoded on the CPU to the host's RG8 texels
   };
   static bool FormatoDe(uint32_t formato, FormatoDk& f);
   // The descriptor slot of the texture a fetch constant names (0 = the empty one of that type), with what the shader
