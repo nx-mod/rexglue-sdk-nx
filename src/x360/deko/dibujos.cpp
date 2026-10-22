@@ -626,7 +626,7 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
   viewport[1] = centro_y + escala_y;
   viewport[3] = -2.0f * escala_y;
   if (!((r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1)) {
-    Avisar(14, "espacio de recorte OpenGL (dx_clip_space_def = 0): Z sin ajustar");
+    Avisar(14, "espacio de recorte OpenGL (dx_clip_space_def = 0): Z ajustada por los shaders traducidos (byte 492)");
   }
   viewport[4] = std::clamp(centro_z, 0.0f, 1.0f);
   viewport[5] = std::clamp(centro_z + escala_z, 0.0f, 1.0f);
@@ -1798,6 +1798,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // or from 0 without indices), so a shader that reads whole buffers by vertex index (Halo 3's translator, r0.x) adds
   // it back to gl_VertexID.
   compartidas[122] = vmin;
+  // Byte 492: 1.0 when the draw is in OpenGL clip space (dx_clip_space_def = 0, z from -w to w): the translator's vertex
+  // shaders then remap z to the host's 0..w (Halo 3; NFS's shaders do not read it).
+  const float z_opengl = (r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1 ? 0.0f : 1.0f;
+  std::memcpy(&compartidas[123], &z_opengl, sizeof(z_opengl));
 
   // --- The deferred sky (nfsmw_nativo_cielo_aplazado; the Vulkan path's criteria, explained there). The dome is the
   // sky's pixel shader, opaque, testing depth without writing it, no stencil, 480 indices, the first draw of the
