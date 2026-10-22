@@ -737,7 +737,11 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
     Rechazar(7, "destino de render con pitch 0");
     return nullptr;
   }
-  const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(formato) << 16) | pitch;
+  // EDRAM is memory: a game draws into a base with one format and resolves it with another (Halo 3 draws 8_8_8_8_GAMMA
+  // and copies as 8_8_8_8 out of the same tiles). Every format here is RGBA8 on the host, so the key only tells the
+  // 32-bit formats from the 64-bit ones (16_16_16_16 and its float, 5 and 7), whose tiles hold half the pixels.
+  const uint32_t clase = (formato == 5 || formato == 7) ? 1u : 0u;
+  const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
   if (auto it = destinos_.find(clave); it != destinos_.end()) {
     return &it->second;
   }
