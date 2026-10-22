@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <span>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,10 @@ struct GlslDeko {
   // Interpolator locations (TEXCOORDn = n, COLORn = 16 + n): what a pixel shader reads, what a vertex shader
   // still writes after `salidas` (SpirvAGlsl).
   uint32_t interpoladores = 0;
+  // Storage buffers (Halo 3's vertex fetches with no vertex element, g_vf<slot> in set 5): bit N = binding N is read,
+  // slots_vf[N] = the vertex fetch slot it holds (from the name).
+  uint32_t buffers = 0;
+  std::array<uint8_t, 16> slots_vf{};
   std::string error;
   // Shapes that compile but that uam is known to get wrong (HowToDeko3d.md, section 6): a dynamic component
   // index into a UBO vector. One line each; the caller logs them.

@@ -41,6 +41,9 @@ struct EntradaShader {
   bool descarta = false;
   bool sombra_minimo = false;
   uint32_t constantes_bytes = 256 * 16;
+  // Vertex inputs at locations 0, 1, ... in the order each (usage, index) first appears in `elementos` (Halo 3's
+  // translator), instead of the fixed usage table (NFS).
+  bool ubicaciones_por_orden = false;
 };
 
 }  // namespace rex::x360

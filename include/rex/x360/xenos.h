@@ -65,6 +65,13 @@ inline constexpr uint32_t kRemapeoIdentidad = 0xFFF;
 
 inline constexpr uint32_t kMemoriaFisica = 0x20000000;
 
+// Color render target formats drawn into an RGBA8 host target: NFS's 8_8_8_8 (and gamma), and for now Halo 3's
+// 2_10_10_10 and its 7e3 float variants (2, 3, 10, 12), which lose precision (the float ones clamp to 0-1) until
+// they get their own host formats.
+inline bool DestinoComoRgba8(uint32_t formato) {
+  return formato == 0 || formato == 1 || formato == 2 || formato == 3 || formato == 10 || formato == 12;
+}
+
 // One guest vertex binding into the upload buffer, as host words with the fetch constant's byte order.
 // Done by the ring thread or by the copy thread (nfsmw_nativo_subidas_hilo).
 struct TrabajoCopia {

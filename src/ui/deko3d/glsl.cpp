@@ -5,6 +5,7 @@
 #include <spirv_glsl.hpp>
 
 #include <cctype>
+#include <cstdio>
 #include <exception>
 
 namespace rex::deko3d {
@@ -250,6 +251,17 @@ GlslDeko SpirvAGlsl(std::span<const uint32_t> espirv, uint32_t especializacion, 
           r.interpoladores |= 1u << ubicacion;
         }
       }
+    }
+    for (const spirv_cross::Resource& b : compilador.get_shader_resources(usados).storage_buffers) {
+      const uint32_t enlace = compilador.get_decoration(b.id, spv::DecorationBinding);
+      unsigned slot = 0;
+      if (enlace >= 16 || std::sscanf(compilador.get_name(b.id).c_str(), "g_vf%u", &slot) != 1 || slot > 95) {
+        r.error = "bufer de almacenamiento " + compilador.get_name(b.id) + " en el binding " + std::to_string(enlace) +
+                  ": se esperaba g_vf<ranura> en 0-15";
+        return r;
+      }
+      r.buffers |= 1u << enlace;
+      r.slots_vf[enlace] = uint8_t(slot);
     }
     for (const spirv_cross::Resource& ubo : compilador.get_shader_resources(usados).uniform_buffers) {
       const uint32_t enlace = compilador.get_decoration(ubo.id, spv::DecorationBinding);

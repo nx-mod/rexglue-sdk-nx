@@ -375,6 +375,9 @@ class RenderDk final : public DestinosNativos {
     uint32_t mascara = ~0u;    // MascaraEspecializacion
     uint32_t interpoladores = 0;  // pixel shader: the locations it reads
     bool interpoladores_listos = false;
+    uint32_t ubos = 0;                 // bit N: reads the UBO at binding N (3 = Halo 3's booleans and loops)
+    uint32_t buffers = 0;              // bit N: reads storage buffer N (a vertex fetch with no element)
+    std::array<uint8_t, 16> slots_vf{};  // the vertex fetch slot of each storage buffer
   };
   InfoShader& InfoDe(const EntradaShader& entrada);
   void RecogerCompilaciones();
@@ -619,7 +622,7 @@ class RenderDk final : public DestinosNativos {
     uint64_t trabajo = UINT64_MAX, generacion = 0, valido_hasta = 0;
     bool toca_coches = false;
     uint32_t dir_coches = 0;
-    std::array<uint32_t, 96> fetch{};
+    std::array<uint32_t, 192> fetch{};  // the 32 texture fetch constants
     std::array<DkResHandle, 32> texturas{};
     uint32_t n_texturas = 0;
     std::array<uint32_t, 32> inversos{};
@@ -656,7 +659,7 @@ class RenderDk final : public DestinosNativos {
   uint64_t bloques_trabajo_ = UINT64_MAX;
   DkGpuAddr bloque_vs_ = 0, bloque_ps_ = 0, bloque_compartidas_ = 0;
   std::array<uint32_t, 1024> sombra_vs_{};  // 256 registers
-  std::array<uint32_t, 896> sombra_ps_{};   // 224 registers
+  std::array<uint32_t, 1024> sombra_ps_{};  // 256 registers
   std::array<uint32_t, 128> sombra_compartidas_{};
   uint64_t bloque_vs_generacion_ = UINT64_MAX, bloque_ps_generacion_ = UINT64_MAX;
   uint32_t bloque_vs_cubierto_ = 0, bloque_ps_cubierto_ = 0;  // bytes compared at that generation

@@ -907,8 +907,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   }
   const uint32_t info_color = reg.rb_color_info[origen];
   const uint32_t formato_color = (info_color >> 16) & 0xF;
-  if (formato_color != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-      formato_color != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+  if (!DestinoComoRgba8(formato_color)) {
     return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
   }
   int32_t x0, y0, x1, y1;

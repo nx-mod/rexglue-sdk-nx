@@ -133,7 +133,7 @@ constexpr uint32_t kVarianteResplandorSuave = 4;
 constexpr uint32_t kPalabraInvTamano = 90;
 constexpr uint32_t kMaxVerticesPorDibujo = uint32_t(1) << 20;
 constexpr uint32_t kUboBytesVs = 256 * 16;
-constexpr uint32_t kUboBytesPs = 224 * 16;
+constexpr uint32_t kUboBytesPs = 256 * 16;  // NFS reads 224, Halo 3 all 256
 constexpr uint32_t kUboBytesCompartidas = 31 * 16;
 constexpr uint32_t kTodasLasSalidas = ~0u;
 
@@ -517,7 +517,26 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
     const uint32_t formato = (d1 >> 16) & 0x3F;
     const uint32_t zancada = (d2 & 0xFF) * 4;
     const int32_t offset = (int32_t(d2 << 1) >> 9) * 4;
-    const int32_t ubicacion = UbicacionDeUso(elemento.uso, elemento.indice_uso);
+    int32_t ubicacion = -1;
+    if (vs.ubicaciones_por_orden) {
+      // The translator's rule (HALO3_RECOMP): the position of this (usage, index) among the distinct ones, in
+      // element order.
+      int32_t distintos = 0;
+      for (const ElementoVertice& otro : vs.elementos) {
+        if (otro.uso == elemento.uso && otro.indice_uso == elemento.indice_uso) {
+          ubicacion = distintos;
+          break;
+        }
+        bool visto = false;
+        for (const ElementoVertice& previo : vs.elementos) {
+          if (&previo == &otro) break;
+          visto |= previo.uso == otro.uso && previo.indice_uso == otro.indice_uso;
+        }
+        distintos += !visto;
+      }
+    } else {
+      ubicacion = UbicacionDeUso(elemento.uso, elemento.indice_uso);
+    }
     if (ubicacion < 0 || ubicacion >= 16 || ((ubicaciones_usadas >> ubicacion) & 0x1)) {
       Avisar(22, "elemento de vertices sin ubicacion libre en el shader: se omite");
       continue;
@@ -854,9 +873,16 @@ RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
     info.huella = deko::HuellaSpirv(espirv);
     info.mascara = deko::MascaraEspecializacion(espirv);
   }
-  if (!entrada.vertices && !info.interpoladores_listos) {
-    // What the pixel shader reads: the vertex shader variant (the PC tool does the same, nfsmw_dksh.cpp).
-    info.interpoladores = deko::SpirvAGlsl(entrada.spirv, 0).interpoladores;
+  if (!info.interpoladores_listos) {
+    // What the shader reads (a pixel shader's interpolators: the vertex shader variant, as the PC tool does,
+    // nfsmw_dksh.cpp), and its UBOs and storage buffers, for both stages.
+    const deko::GlslDeko g = deko::SpirvAGlsl(entrada.spirv, 0);
+    if (!entrada.vertices) {
+      info.interpoladores = g.interpoladores;
+    }
+    info.ubos = g.ubos;
+    info.buffers = g.buffers;
+    info.slots_vf = g.slots_vf;
     info.interpoladores_listos = true;
   }
   return info;
@@ -1111,8 +1137,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
     const uint32_t info = r[kInfoColor[i]];
     const uint32_t formato = (info >> 16) & 0xF;
-    if (formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-        formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+    if (!DestinoComoRgba8(formato)) {
       return Rechazar(200 + formato, "formato de destino de color todavia no soportado");
     }
     claves[i] = (uint64_t(1) << 63) | (uint64_t(info & 0xFFF) << 24) | (uint64_t(formato) << 16) | pitch;
@@ -1316,7 +1341,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       !texturas_previas_.toca_coches && texturas_previas_.dir_coches == dir_coches) {
     bool iguales = true;
     for (const SamplerShader& sampler : ps->samplers) {
-      if (sampler.registro < 16 &&
+      if (sampler.registro < 32 &&
           std::memcmp(texturas_previas_.fetch.data() + sampler.registro * 6, r + kRegFetch + uint32_t(sampler.registro) * 6,
                       sizeof(uint32_t) * 6) != 0) {
         iguales = false;
@@ -1339,7 +1364,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   bool toca_coches = false;
   if (ps && !texturas_reusadas) {
     for (const SamplerShader& sampler : ps->samplers) {
-      if (sampler.registro >= 16) {
+      if (sampler.registro >= 32) {  // NFS uses 0-15; Halo 3 fetches up to slot 31
         continue;
       }
       const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.registro) * 6;
@@ -1389,7 +1414,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       }
       const float inv[2] = {cache.ancho ? 1.0f / float(cache.ancho) : 0.0f,
                             cache.alto ? 1.0f / float(cache.alto) : 0.0f};
-      std::memcpy(compartidas + kPalabraInvTamano + sampler.registro * 2, inv, sizeof(inv));
+      if (sampler.registro < 16) {  // the shared block has 1/size for slots 0-15 (the shaders read 0 past that)
+        std::memcpy(compartidas + kPalabraInvTamano + sampler.registro * 2, inv, sizeof(inv));
+      }
     }
     texturas_previas_.ps = ps;
     texturas_previas_.trabajo = trabajo_;
@@ -1397,7 +1424,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     texturas_previas_.valido_hasta = valido_minimo;
     texturas_previas_.toca_coches = toca_coches || sombra_minimo_dibujo;
     texturas_previas_.dir_coches = dir_coches;
-    std::memcpy(texturas_previas_.fetch.data(), r + kRegFetch, sizeof(uint32_t) * 96);
+    std::memcpy(texturas_previas_.fetch.data(), r + kRegFetch, sizeof(uint32_t) * 192);
     texturas_previas_.texturas = texturas;
     texturas_previas_.n_texturas = n_texturas;
     std::memcpy(texturas_previas_.inversos.data(), compartidas + kPalabraInvTamano, sizeof(texturas_previas_.inversos));
@@ -1474,8 +1501,45 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       con_indices && !indices_almacen.gpu ? (indices_de_16 ? n_indices * 2 : n_indices * 4) : 0;
   const uint32_t bytes_vs = std::min<uint32_t>(p.vs->constantes_bytes, kRegistrosConstantes * 4);
   const uint32_t bytes_ps = ps ? std::min<uint32_t>(ps->constantes_bytes, kRegistrosConstantes * 4) : 0;
+  // Halo 3: the ranges its vertex fetches with no element read (storage buffers), and its block of booleans and
+  // loop constants (UBO 3). NFS's shaders read neither.
+  struct BuferVf {
+    DkStage etapa;
+    uint32_t enlace;
+    const uint8_t* datos;
+    xenos::Endian orden;
+    uint32_t bytes;
+  };
+  std::array<BuferVf, 32> buferes_vf;
+  uint32_t n_buferes_vf = 0, bytes_buferes_vf = 0;
+  bool bloque_halo = false;
+  for (const EntradaShader* e : {p.vs, ps}) {
+    if (!e) {
+      continue;
+    }
+    const InfoShader& info = InfoDe(*e);
+    bloque_halo |= (info.ubos >> 3) & 0x1;
+    for (uint32_t b = 0; b < 16; ++b) {
+      if (!((info.buffers >> b) & 0x1)) {
+        continue;
+      }
+      const uint32_t slot = info.slots_vf[b];
+      const uint32_t d0 = r[kRegFetch + slot * 2], d1 = r[kRegFetch + slot * 2 + 1];
+      uint32_t bytes = ((d1 >> 2) & 0xFFFFFF) * 4;
+      const uint32_t direccion = d0 & 0x1FFFFFFC;
+      if ((d0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex) || uint64_t(direccion) + bytes > kMemoriaFisica) {
+        bytes = 0;  // bound as an empty buffer: the loads read zeros
+      }
+      bytes = std::min<uint32_t>(bytes, 4u << 20);
+      buferes_vf[n_buferes_vf++] = {e->vertices ? DkStage_Vertex : DkStage_Fragment, b,
+                                    bytes ? memoria_->TranslatePhysical(direccion) : nullptr,
+                                    static_cast<xenos::Endian>(d1 & 0x3), bytes};
+      bytes_buferes_vf += ((std::max(bytes, 16u) + 255) & ~255u) + DK_UNIFORM_BUF_ALIGNMENT;
+    }
+  }
   const uint32_t necesarios = bytes_vertices + bytes_indices + 16 + 3 * DK_UNIFORM_BUF_ALIGNMENT +
-                              std::max(bytes_vs, kUboBytesVs) + std::max(bytes_ps, kUboBytesPs) + kUboBytesCompartidas;
+                              std::max(bytes_vs, kUboBytesVs) + std::max(bytes_ps, kUboBytesPs) + kUboBytesCompartidas +
+                              bytes_buferes_vf + (bloque_halo ? 2 * DK_UNIFORM_BUF_ALIGNMENT : 0);
   const uint32_t rebanada = nucleo_.config().mb_subida << 20;
   if (necesarios > rebanada) {
     return Rechazar(13, "dibujo mayor que el anillo de subida");
@@ -1491,6 +1555,31 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
   }
   DkCmdBuf cmd = nucleo_.comandos();
+
+  // --- Halo 3's storage buffers and its booleans and loop constants (their space is in `necesarios`)
+  for (uint32_t i = 0; i < n_buferes_vf; ++i) {
+    const BuferVf& v = buferes_vf[i];
+    const uint32_t tam = (std::max(v.bytes, 16u) + 15) & ~15u;
+    const deko::Subida s = nucleo_.Reservar(tam, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!s) {
+      return Rechazar(13, "sin sitio en el anillo de subida");
+    }
+    std::memset(s.cpu, 0, tam);
+    if (v.bytes) {
+      CopiarVertices(TrabajoCopia{v.datos, s.cpu, v.bytes / 4, v.orden});  // byte-swapped as vertex data
+    }
+    dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu, tam);
+  }
+  if (bloque_halo) {
+    // 256 booleans (8 words at 0x4900) then the 32 loop constants (0x4908): halo3_shader_common.h's block.
+    const deko::Subida s = nucleo_.Reservar(DK_UNIFORM_BUF_ALIGNMENT, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!s) {
+      return Rechazar(13, "sin sitio en el anillo de subida");
+    }
+    std::memcpy(s.cpu, r + kRegBooleanos, 40 * sizeof(uint32_t));
+    dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
+    dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
+  }
 
   // --- Framing (cached while generacion_encuadre and the pass do not change)
   const uint32_t vte = r[gr::XE_GPU_REG_PA_CL_VTE_CNTL];
