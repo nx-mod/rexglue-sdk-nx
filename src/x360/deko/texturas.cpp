@@ -413,7 +413,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   const uint32_t swizzle = (f[3] >> 1) & 0xFFF;
   const uint32_t base = (f[1] >> 12) << 12;
   if (!cubo && !volumen) {
-    if (const ImagenDk* resuelta = TexturaResuelta(base & 0x1FFFFFFF)) {
+    if (const ImagenDk* resuelta = TexturaResuelta(base & 0x1FFFFFFF, (f[2] & 0x1FFF) + 1, ((f[2] >> 13) & 0x1FFF) + 1)) {
       // Resolved textures report their size like any other (without it the shadow PCF taps collapse).
       ancho_out = resuelta->ancho;
       alto_out = resuelta->alto;

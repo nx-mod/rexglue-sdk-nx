@@ -800,14 +800,32 @@ RenderDk::Resuelta* RenderDk::ObtenerResuelta(uint32_t base, uint32_t ancho, uin
       r.imagen.intercambio_rb = intercambio_rb;
       return &r;
     }
-    // Another size or format at the same address. Its memory and descriptors are only reused after the fence of
-    // this slot, so nothing waits here.
+    // Another size or format at the same address: the current one is kept aside (resueltas_otras_), and one of the
+    // new size kept from before comes back, so the two a frame alternates are not recreated every time.
     if (frontal_.pendiente && frontal_.resuelta == &r) {
-      frontal_.pendiente = false;  // its texture goes: nothing to copy into
+      frontal_.pendiente = false;  // its texture moves: nothing to copy into
     }
-    DestruirImagen(r.imagen);
+    const bool era_profundidad = r.imagen.formato == DkImageFormat_Z24S8;
+    const uint64_t aparte = ClaveOtra(base, r.imagen.ancho, r.imagen.alto, era_profundidad);
+    if (auto viejo = resueltas_otras_.find(aparte); viejo != resueltas_otras_.end()) {
+      DestruirImagen(viejo->second.imagen);  // its memory is only reused after the fence of this slot
+      resueltas_otras_.erase(viejo);
+    }
+    resueltas_otras_.emplace(aparte, std::move(r));
     resueltas_.erase(it);
     SombraMinimoResueltaEscrita(base);
+    if (auto vuelta = resueltas_otras_.find(ClaveOtra(base, ancho, alto, profundidad));
+        vuelta != resueltas_otras_.end() && vuelta->second.imagen.formato == formato_host) {
+      Resuelta& de_vuelta = resueltas_.emplace(base, std::move(vuelta->second)).first->second;
+      resueltas_otras_.erase(vuelta);
+      if (de_vuelta.formato_guest != formato || de_vuelta.imagen.intercambio_rb != intercambio_rb) {
+        ++generacion_texturas_;
+      }
+      de_vuelta.formato_guest = formato;
+      de_vuelta.imagen.intercambio_rb = intercambio_rb;
+      ++generacion_texturas_;  // that address is sampled from this one again
+      return &de_vuelta;
+    }
   }
   Resuelta r;
   // A depth texture has the depth targets' flags (resolves without copy swap their images).
@@ -845,6 +863,29 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
     return nullptr;
   }
   return &it->second.imagen;
+}
+
+const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion, uint32_t ancho, uint32_t alto) {
+  const ImagenDk* actual = TexturaResuelta(direccion);
+  if (resueltas_otras_.empty() || (actual && actual->ancho == ancho && actual->alto == alto)) {
+    return actual;
+  }
+  // The texture's size may be its pitch-aligned width: the smallest kept image that covers it, of those written.
+  const ImagenDk* mejor = nullptr;
+  auto considerar = [&](const ImagenDk& i) {
+    if (i.ancho >= ancho && i.alto >= alto && (!mejor || uint64_t(i.ancho) * i.alto < uint64_t(mejor->ancho) * mejor->alto)) {
+      mejor = &i;
+    }
+  };
+  if (actual) {
+    considerar(*actual);
+  }
+  for (const auto& [clave, r] : resueltas_otras_) {
+    if (uint32_t(clave) == direccion && r.escrita && r.imagen.formato != DkImageFormat_Z24S8) {
+      considerar(r.imagen);
+    }
+  }
+  return mejor ? mejor : actual;
 }
 
 // ---- Copies (resolve and clear)

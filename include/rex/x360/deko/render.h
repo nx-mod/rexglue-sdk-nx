@@ -221,6 +221,8 @@ class RenderDk final : public DestinosNativos {
   ImagenDk* DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch);
   // The resolved texture at that address, if one exists and has content.
   const ImagenDk* TexturaResuelta(uint32_t direccion);
+  // The one of that size when several were resolved to the address (resueltas_otras_), else as above.
+  const ImagenDk* TexturaResuelta(uint32_t direccion, uint32_t ancho, uint32_t alto);
   struct Resuelta {
     ImagenDk imagen;
     uint32_t formato_guest = 0;
@@ -429,6 +431,13 @@ class RenderDk final : public DestinosNativos {
   std::unordered_map<uint64_t, ImagenDk> destinos_;
   std::unordered_map<uint64_t, ImagenDk> profundidades_;
   std::unordered_map<uint32_t, Resuelta> resueltas_;
+  // Resolved textures displaced from resueltas_ by another size at the same address, by ClaveOtra (base and size):
+  // Halo 3 resolves the 1152x640 scene and a 288x160 downscale to the same address every frame, and both are
+  // sampled. Swapped back into resueltas_ when that size is resolved again, so neither is recreated every frame.
+  std::unordered_map<uint64_t, Resuelta> resueltas_otras_;
+  static uint64_t ClaveOtra(uint32_t base, uint32_t ancho, uint32_t alto, bool profundidad) {
+    return uint64_t(base) | uint64_t(ancho & 0x3FFF) << 32 | uint64_t(alto & 0x3FFF) << 46 | uint64_t(profundidad) << 60;
+  }
   // Read-backs: kBytesLecturaRanura per work slot in one CPU-cached, GPU-uncached block
   std::vector<LecturasRanura> lecturas_;
   DkMemBlock lectura_bloque_ = nullptr;
