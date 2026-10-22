@@ -432,6 +432,16 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
 #endif
     }
   });
+#if REX_PLATFORM_SWITCH
+  // Show the on-screen stats overlay (guest FPS / frame time) from boot on the Switch, where
+  // there is no keyboard to press F3. The guest frame-stats provider is wired in later by
+  // SetGuestFrameStats; until then the overlay just shows host timing. Toggle with L+R+Up.
+  if (!debug_overlay_) {
+    debug_overlay_ =
+        std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+    debug_overlay_->SetPositionFile(config_path_.parent_path() / "overlay_depuracion.txt");
+  }
+#endif
   rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
     if (console_overlay_) {
       console_overlay_.reset();
