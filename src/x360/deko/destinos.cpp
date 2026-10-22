@@ -26,6 +26,9 @@
 
 // Settings of the renderer that the game hooks also read (nfsmw_nativo_ganchos.cpp). The Vulkan build defines them
 // in nfsmw_nativo_dibujos.cpp, which this build leaves out: same names, types and defaults.
+REXCVAR_DEFINE_BOOL(deko_bandas_profundidad, false, "deko3d",
+                    "Testing: depth resolves of predicated-tiling bands into one texture, as the color ones")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
                     "off = everything RGBA8 as before")
@@ -801,6 +804,10 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
 // the texture's base and `filas` the rows down. nullptr if there is none.
 RenderDk::Resuelta* RenderDk::BandaDe(uint32_t& base, uint32_t ancho, uint32_t alto_destino, uint32_t pitch,
                                       bool profundidad, uint32_t& filas) {
+  static const bool bandas_profundidad = REXCVAR_GET(deko_bandas_profundidad);
+  if (profundidad && !bandas_profundidad) {
+    return nullptr;
+  }
   const uint64_t fila_baldosas = uint64_t((pitch + 31) / 32) * 4096;  // 32 rows of 4-byte texels
   for (auto& [b, r] : resueltas_) {
     if (b >= base || r.imagen.profundidad != profundidad || r.imagen.ancho != ancho) {
