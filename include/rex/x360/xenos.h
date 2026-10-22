@@ -79,11 +79,12 @@ inline bool CopiaComoRgba8(uint32_t formato) {
          formato == 26 || formato == 31 || formato == 32;
 }
 
-// Formats whose values leave 0..1, held as RGBA16F on the host instead of RGBA8: render targets 7e3 (3, 12) and the
-// 16-bit ones (4-7), and resolves to 16_16 / 16_16_16_16 and their floats (25, 26, 31, 32). Halo 3 measures its
-// exposure through a chain of these (log brightness, below 0): in RGBA8 it read 0 and raised the exposure every frame
-// until the screen was white.
-inline bool DestinoFlotante(uint32_t formato) { return (formato >= 3 && formato <= 7) || formato == 12; }
+// Formats whose values leave 0..1, held as RGBA16F on the host instead of RGBA8: the 64-bit render targets
+// 16_16_16_16 and its float (5, 7), and resolves to 16_16 / 16_16_16_16 and their floats (25, 26, 31, 32). Halo 3
+// measures its exposure through a chain of these (log brightness, below 0): in RGBA8 it read 0 and raised the exposure
+// every frame until the screen was white. Not the 32-bit ones: 7e3 (3) shares its EDRAM tiles with 2_10_10_10 (10) in
+// Halo 3's scene, drawn as one and read as the other, so they must stay one image.
+inline bool DestinoFlotante(uint32_t formato) { return formato == 5 || formato == 7; }
 inline bool CopiaFlotante(uint32_t formato) {
   return formato == 25 || formato == 26 || formato == 31 || formato == 32;
 }
