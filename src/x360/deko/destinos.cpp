@@ -740,7 +740,8 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   // EDRAM is memory: a game draws into a base with one format and resolves it with another (Halo 3 draws 8_8_8_8_GAMMA
   // and copies as 8_8_8_8 out of the same tiles). Every format here is RGBA8 on the host, so the key only tells the
   // 32-bit formats from the 64-bit ones (16_16_16_16 and its float, 5 and 7), whose tiles hold half the pixels.
-  const uint32_t clase = (formato == 5 || formato == 7) ? 1u : 0u;
+  const bool flotante = DestinoFlotante(formato);
+  const uint32_t clase = ((formato == 5 || formato == 7) ? 1u : 0u) | (flotante ? 2u : 0u);
   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
   if (auto it = destinos_.find(clave); it != destinos_.end()) {
     return &it->second;
@@ -752,7 +753,8 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   if (REXCVAR_GET(nfsmw_dk_compresion_color)) {
     flags |= DkImageFlags_HwCompression;
   }
-  if (!CrearImagen(imagen, DkImageType_2D, DkImageFormat_RGBA8_Unorm, pitch, alto, 1, 1, flags, "destino de color")) {
+  if (!CrearImagen(imagen, DkImageType_2D, flotante ? DkImageFormat_RGBA16_Float : DkImageFormat_RGBA8_Unorm, pitch, alto,
+                   1, 1, flags, "destino de color")) {
     Rechazar(8, "no se pudo crear un destino de render");
     return nullptr;
   }
@@ -793,7 +795,9 @@ RenderDk::Resuelta* RenderDk::ObtenerResuelta(uint32_t base, uint32_t ancho, uin
     Rechazar(9, "copia a una textura de tamano 0");
     return nullptr;
   }
-  const DkImageFormat formato_host = profundidad ? DkImageFormat_Z24S8 : DkImageFormat_RGBA8_Unorm;
+  const DkImageFormat formato_host = profundidad              ? DkImageFormat_Z24S8
+                                     : CopiaFlotante(formato) ? DkImageFormat_RGBA16_Float
+                                                              : DkImageFormat_RGBA8_Unorm;
   if (auto it = resueltas_.find(base); it != resueltas_.end()) {
     Resuelta& r = it->second;
     if (r.imagen.ancho == ancho && r.imagen.alto == alto && r.imagen.formato == formato_host) {
@@ -1074,11 +1078,16 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
         const DkImageView destino_vista = VistaCompleta(resuelta->imagen.imagen);
         // On the 3D engine, except the shrink (a linear blit) and the small resolves the game reads back (their
         // read-back is a copy engine transfer: both go there, one after the other, with no barrier between).
-        if (encoger || se_lee ||
+        // Different host formats (a float target to an 8-bit texture or back) only on the 3D engine or the blit:
+        // the copy engine moves bytes.
+        const bool mismo_formato = destino_render->formato == resuelta->imagen.formato;
+        if (encoger || (se_lee && mismo_formato) ||
             !Copiar3D(*destino_render, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy)) {
           MarcarGpu(kGpuCopias);
           AntesDeTransferir();
-          if (encoger) {
+          if (!encoger && !mismo_formato) {
+            Avisar(15, "copia entre formatos distintos sin el motor 3D: no se hace");
+          } else if (encoger) {
             const DkImageRect a = {uint32_t(x0), uint32_t(y0), 0, pedido_ancho, pedido_alto, 1};
             const DkImageRect b = {dx, dy, 0, cabe_ancho, cabe_alto, 1};
             dkCmdBufBlitImage(cmd, &origen_vista, &a, &destino_vista, &b, DkBlitFlag_FilterLinear, 0);
