@@ -304,4 +304,76 @@ GlslDeko SpirvAGlsl(std::span<const uint32_t> espirv, uint32_t especializacion, 
   return r;
 }
 
+uint32_t MascaraTraductor(bool vertices) {
+  constexpr uint32_t kInvTamano = 1u << 9, kAlfa = (1u << 1) | (7u << 16);  // shader_common.glsl's SPEC_CONSTANT_*
+  return vertices ? kInvTamano : kInvTamano | kAlfa;
+}
+
+GlslDeko GlslDeTraductor(std::string_view texto, bool vertices, uint32_t especializacion) {
+  GlslDeko r;
+  r.vertices = vertices;
+  // Each `layout(` declaration: its qualifiers, then what follows up to the end of the line.
+  for (size_t at = texto.find("layout("); at != std::string_view::npos; at = texto.find("layout(", at + 7)) {
+    if (at && texto[at - 1] != '\n') {
+      continue;  // only declarations at the start of a line (not text in a comment)
+    }
+    const size_t cierre = texto.find(')', at);
+    const size_t fin_linea = texto.find('\n', at);
+    if (cierre == std::string_view::npos || cierre > fin_linea) {
+      continue;
+    }
+    const std::string_view calificadores = texto.substr(at + 7, cierre - at - 7);
+    const std::string_view resto = texto.substr(cierre + 1, fin_linea - cierre - 1);
+    unsigned numero = 0;
+    if (const size_t l = calificadores.find("location ="); l != std::string_view::npos) {
+      if (std::sscanf(std::string(calificadores.substr(l + 10)).c_str(), "%u", &numero) != 1 || numero >= 32) {
+        continue;
+      }
+      const bool entrada = resto.starts_with(" in "), salida = resto.starts_with(" out ");
+      if ((!vertices && entrada) || (vertices && salida)) {
+        r.interpoladores |= 1u << numero;
+      }
+      continue;
+    }
+    const size_t b = calificadores.find("binding =");
+    if (b == std::string_view::npos ||
+        std::sscanf(std::string(calificadores.substr(b + 9)).c_str(), "%u", &numero) != 1) {
+      continue;
+    }
+    if (resto.starts_with(" uniform sampler")) {
+      if (numero >= kMaxTexturas) {
+        r.error = "textura en el binding " + std::to_string(numero) + ", fuera de los 32 de deko3d";
+        return r;
+      }
+      r.texturas |= 1u << numero;
+      if (resto.starts_with(" uniform sampler3D")) {
+        r.texturas_3d |= 1u << numero;
+      } else if (resto.starts_with(" uniform samplerCube")) {
+        r.texturas_cubo |= 1u << numero;
+      }
+    } else if (resto.starts_with(" readonly buffer XenoVf")) {
+      unsigned slot = 0;
+      if (numero >= 16 || std::sscanf(std::string(resto.substr(23)).c_str(), "%u", &slot) != 1 || slot > 95) {
+        r.error = "bufer de almacenamiento en el binding " + std::to_string(numero) + ": se esperaba XenoVf<ranura> en 0-15";
+        return r;
+      }
+      r.buffers |= 1u << numero;
+      r.slots_vf[numero] = uint8_t(slot);
+    } else if (resto.starts_with(" uniform ")) {
+      if (numero >= kMaxUbos) {
+        r.error = "UBO en el binding " + std::to_string(numero) + ", fuera de los 16 de deko3d";
+        return r;
+      }
+      r.ubos |= 1u << numero;
+    }
+  }
+  char cabecera[96];
+  std::snprintf(cabecera, sizeof(cabecera), "#version 460\n#define G_ESPECIALIZACION 0x%08Xu\n", especializacion);
+  r.glsl.reserve(texto.size() + 64);
+  r.glsl = cabecera;
+  r.glsl += texto;
+  BuscarComponentesDinamicos(r.glsl, r.avisos);
+  return r;
+}
+
 }  // namespace rex::deko3d

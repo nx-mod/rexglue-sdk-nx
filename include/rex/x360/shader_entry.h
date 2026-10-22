@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace rex::x360 {
@@ -44,6 +45,9 @@ struct EntradaShader {
   // Vertex inputs at locations 0, 1, ... in the order each (usage, index) first appears in `elementos` (Halo 3's
   // translator), instead of the fixed usage table (NFS).
   bool ubicaciones_por_orden = false;
+  // GLSL the game translated at run time (XenosRecomp's XENOS_GLSL mode, its prelude included, no #version). When it
+  // is not empty the renderer compiles it with uam instead of `spirv` (rex/ui/deko3d/glsl.h, GlslDeTraductor).
+  std::string glsl;
 };
 
 }  // namespace rex::x360

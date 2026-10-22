@@ -16,6 +16,7 @@
 #include <span>
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace rex::deko3d {
@@ -70,6 +71,23 @@ GlslDeko SpirvAGlsl(std::span<const uint32_t> espirv, uint32_t especializacion, 
  * masking, correct and only slower to compile.
  */
 uint32_t MascaraEspecializacion(std::span<const uint32_t> espirv);
+
+/*
+ * GLSL a game's translator wrote at run time (XenosRecomp's XENOS_GLSL mode, its prelude included, no #version):
+ * the same result as SpirvAGlsl, with #version 460 and G_ESPECIALIZACION put in front, and what the shader reads
+ * taken from its declarations' text:
+ *   layout(location = k) in/out ...                  interpolators (a pixel shader's inputs, a vertex shader's outputs)
+ *   layout(binding = N) uniform samplerXX ...        textures
+ *   layout(std430, binding = N) readonly buffer XenoVf<slot>   storage buffers (Halo 3's element-less vertex fetches)
+ *   layout(std140, binding = N) uniform ...          UBOs
+ * Every vertex shader output stays (no `salidas`): the translator writes at most 16 and uam drops the dead ones only
+ * as far as it can without linking.
+ */
+GlslDeko GlslDeTraductor(std::string_view texto, bool vertices, uint32_t especializacion);
+
+// The specialization bits the translator's GLSL reads (shader_common.glsl): 1/size for both stages, the alpha test
+// and its function for pixel shaders.
+uint32_t MascaraTraductor(bool vertices);
 
 }  // namespace rex::deko3d
 

@@ -868,6 +868,20 @@ void RenderDk::CerrarFotogramaDeLaGuardiaDelCielo() {
 
 RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
   InfoShader& info = info_shaders_[&entrada];
+  if (!entrada.glsl.empty()) {
+    // Translated at run time: the text says what it reads, and its hash is the DKSH cache key.
+    if (!info.interpoladores_listos) {
+      info.huella = XXH3_64bits(entrada.glsl.data(), entrada.glsl.size());
+      info.mascara = deko::MascaraTraductor(entrada.vertices);
+      const deko::GlslDeko g = deko::GlslDeTraductor(entrada.glsl, entrada.vertices, 0);
+      info.interpoladores = entrada.vertices ? 0 : g.interpoladores;
+      info.ubos = g.ubos;
+      info.buffers = g.buffers;
+      info.slots_vf = g.slots_vf;
+      info.interpoladores_listos = true;
+    }
+    return info;
+  }
   if (!info.huella) {
     const auto& espirv = entrada.spirv;
     info.huella = deko::HuellaSpirv(espirv);
@@ -894,6 +908,9 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
   // The SPIR-V: the library's, or the bright pass replaced by a glow variant (same inputs and constants, so the
   // library shader's mask applies).
   std::span<const uint32_t> espirv(entrada.spirv);
+  if (variante_ps && !entrada.glsl.empty()) {
+    variante_ps &= kVarianteZTemprana;  // the glow variants are SPIR-V (NFS): the text keeps only early depth
+  }
   if (variante_ps) {
     const std::span<const uint32_t> v = hooks_.SpirvDeVariante(variante_ps);
     if (!v.empty()) {
@@ -901,7 +918,12 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     }
   }
   const uint32_t espec = especializacion & info.mascara;
-  const uint32_t variante = entrada.vertices ? salidas : variante_ps;
+  // The translator's GLSL keeps every vertex shader output (GlslDeTraductor): one variant.
+  const bool de_texto = !entrada.glsl.empty();
+  const uint32_t variante = entrada.vertices ? (de_texto ? kTodasLasSalidas : salidas) : variante_ps;
+  auto a_glsl = [&](std::span<const uint32_t> spv, uint32_t v) {
+    return de_texto ? deko::GlslDeTraductor(entrada.glsl, entrada.vertices, espec) : deko::SpirvAGlsl(spv, espec, v);
+  };
   const ClaveCargado clave{&entrada, espec, variante};
   if (const auto it = cargados_.find(clave); it != cargados_.end()) {
     return it->second.get();
@@ -947,7 +969,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     // compiles on the worker; it is not remembered here, so the next draw looks in the cache again.
     const uint64_t h = XXH3_64bits(&clave_cache, sizeof(clave_cache));
     if (en_fondo_.emplace(h, true).second) {
-      const deko::GlslDeko g = deko::SpirvAGlsl(entrada.spirv, espec, variante);
+      const deko::GlslDeko g = a_glsl(entrada.spirv, variante);
       if (!g.glsl.empty()) {
         std::weak_ptr<Bandeja> bandeja = bandeja_;
         compilador_.Encolar(true, g.glsl, [bandeja, clave_cache](deko::Compilador::Resultado r) {
@@ -969,7 +991,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     // depth only changes speed) or, for the glow, the game's own bright pass for a few frames.
     const uint64_t h = XXH3_64bits(&clave_cache, sizeof(clave_cache));
     if (en_fondo_.emplace(h, true).second) {
-      deko::GlslDeko g = deko::SpirvAGlsl(espirv, espec, kTodasLasSalidas);
+      deko::GlslDeko g = a_glsl(espirv, kTodasLasSalidas);
       if (!g.glsl.empty()) {
         if (variante_ps & kVarianteZTemprana) {
           DeclararZTemprana(g.glsl);
@@ -991,7 +1013,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
   }
   // On the spot (it blocks the ring thread for one compile: ~40-100 ms on the console).
   const uint64_t inicio = deko::AhoraNs();
-  deko::GlslDeko g = deko::SpirvAGlsl(espirv, espec, entrada.vertices ? variante : kTodasLasSalidas);
+  deko::GlslDeko g = a_glsl(espirv, entrada.vertices ? variante : kTodasLasSalidas);
   if (g.glsl.empty()) {
     REXLOG_ERROR("[deko3d] {}: no se pudo pasar a GLSL: {}", nombre, g.error);
     cargados_.emplace(clave, nullptr);
@@ -1039,7 +1061,7 @@ void RenderDk::RecogerCompilaciones() {
 
 bool RenderDk::Dibujar(const PeticionDibujo& p) {
   const uint32_t* r = p.registros;
-  if (!r || !p.vs || p.vs->spirv.empty()) {
+  if (!r || !p.vs || (p.vs->spirv.empty() && p.vs->glsl.empty())) {
     return false;
   }
   const uint64_t inicio_ns = deko::AhoraNs();
@@ -1068,7 +1090,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   if (!ps && modo_edram == uint32_t(xenos::EdramMode::kColorDepth)) {
     return false;
   }
-  if (ps && ps->spirv.empty()) {
+  if (ps && ps->spirv.empty() && ps->glsl.empty()) {
     return false;
   }
   const uint32_t iniciador = r[gr::XE_GPU_REG_VGT_DRAW_INITIATOR];
@@ -1682,6 +1704,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   compartidas[69] = funcion_alfa;
   std::memcpy(&compartidas[70], ndc, sizeof(ndc));
   std::copy(entrada->remapeos.begin(), entrada->remapeos.end(), compartidas + 74);
+  // Byte 488: the first vertex of the draw. The draw rebases its indices by -vmin (dkCmdBufDrawIndexed's vertexOffset,
+  // or from 0 without indices), so a shader that reads whole buffers by vertex index (Halo 3's translator, r0.x) adds
+  // it back to gl_VertexID.
+  compartidas[122] = vmin;
 
   // --- The deferred sky (nfsmw_nativo_cielo_aplazado; the Vulkan path's criteria, explained there). The dome is the
   // sky's pixel shader, opaque, testing depth without writing it, no stencil, 480 indices, the first draw of the
