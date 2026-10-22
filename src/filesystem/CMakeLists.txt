@@ -1,6 +1,7 @@
 add_library(rexfilesystem OBJECT
     device.cpp
     disc_image_extract.cpp
+    first_launch.cpp
     entry.cpp
     virtual_file_system.cpp
     devices/disc_image_device.cpp
