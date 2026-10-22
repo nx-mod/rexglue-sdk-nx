@@ -1012,6 +1012,30 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     }
     return ShaderDe(entrada, especializacion, salidas, 0);
   }
+  if (de_texto && en_fondo) {
+    // Translated at run time (the game's GLSL): compiled on the worker while the draw is skipped, as Xenia does,
+    // instead of holding the ring thread (a translated vertex shader takes uam 0.3-2.5 s on the console). The next
+    // draws find it in the cache once RecogerCompilaciones has added it; one that fails stays skipped (logged there).
+    const uint64_t h = XXH3_64bits(&clave_cache, sizeof(clave_cache));
+    if (en_fondo_.emplace(h, true).second) {
+      deko::GlslDeko g = a_glsl(espirv, kTodasLasSalidas);
+      if (!entrada.vertices && (variante_ps & kVarianteZTemprana)) {
+        DeclararZTemprana(g.glsl);
+      }
+      std::weak_ptr<Bandeja> bandeja = bandeja_;
+      compilador_.Encolar(entrada.vertices, std::move(g.glsl), [bandeja, clave_cache](deko::Compilador::Resultado r) {
+        if (const auto b = bandeja.lock()) {
+          std::lock_guard<std::mutex> cerrojo(b->candado);
+          if (r.ok) {
+            b->hechas.emplace_back(clave_cache, std::move(r.dksh));
+          } else {
+            ++b->fallidas;
+          }
+        }
+      });
+    }
+    return nullptr;
+  }
   // On the spot (it blocks the ring thread for one compile: ~40-100 ms on the console).
   const uint64_t inicio = deko::AhoraNs();
   deko::GlslDeko g = a_glsl(espirv, entrada.vertices ? variante : kTodasLasSalidas);
