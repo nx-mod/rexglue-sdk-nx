@@ -26,6 +26,10 @@
 
 // Settings of the renderer that the game hooks also read (nfsmw_nativo_ganchos.cpp). The Vulkan build defines them
 // in nfsmw_nativo_dibujos.cpp, which this build leaves out: same names, types and defaults.
+REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
+                    "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
+                    "off = everything RGBA8 as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nfsmw_nativo_ps_solo_alfa, true, "NFSMW",
                     "Renderizador nativo: en las pasadas sin destino de color, el pixel shader sin las escrituras "
                     "de color (queda la prueba de alfa)");
@@ -740,7 +744,8 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   // EDRAM is memory: a game draws into a base with one format and resolves it with another (Halo 3 draws 8_8_8_8_GAMMA
   // and copies as 8_8_8_8 out of the same tiles). Every format here is RGBA8 on the host, so the key only tells the
   // 32-bit formats from the 64-bit ones (16_16_16_16 and its float, 5 and 7), whose tiles hold half the pixels.
-  const bool flotante = DestinoFlotante(formato);
+  static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
+  const bool flotante = con_flotantes && DestinoFlotante(formato);
   const uint32_t clase = ((formato == 5 || formato == 7) ? 1u : 0u) | (flotante ? 2u : 0u);
   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
   if (auto it = destinos_.find(clave); it != destinos_.end()) {
@@ -795,9 +800,10 @@ RenderDk::Resuelta* RenderDk::ObtenerResuelta(uint32_t base, uint32_t ancho, uin
     Rechazar(9, "copia a una textura de tamano 0");
     return nullptr;
   }
-  const DkImageFormat formato_host = profundidad              ? DkImageFormat_Z24S8
-                                     : CopiaFlotante(formato) ? DkImageFormat_RGBA16_Float
-                                                              : DkImageFormat_RGBA8_Unorm;
+  static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
+  const DkImageFormat formato_host = profundidad                                ? DkImageFormat_Z24S8
+                                     : con_flotantes && CopiaFlotante(formato) ? DkImageFormat_RGBA16_Float
+                                                                                : DkImageFormat_RGBA8_Unorm;
   if (auto it = resueltas_.find(base); it != resueltas_.end()) {
     Resuelta& r = it->second;
     if (r.imagen.ancho == ancho && r.imagen.alto == alto && r.imagen.formato == formato_host) {
