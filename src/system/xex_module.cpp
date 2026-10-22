@@ -1022,6 +1022,8 @@ bool XexModule::LoadContinue() {
     switch (desc.info) {
       case XEX_SECTION_CODE:
       case XEX_SECTION_READONLY_DATA:
+        // On the Switch the read-only request is kept mapped read-write by RexGmProtect (no cheap
+        // read-only pages there; see guest_memory_switch.cpp). Elsewhere it stays read-only.
         heap->Protect(address, size, memory::kMemoryProtectRead);
         break;
       case XEX_SECTION_DATA:

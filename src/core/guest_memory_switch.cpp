@@ -606,6 +606,21 @@ bool RexGmProtect(uint8_t* address, size_t length, RexGmAccess access, RexGmAcce
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!s.base) return false;
 
+    // The Switch has no cheap read-only pages: a read-only guest page is unmapped, so afterwards every
+    // guest read of it faults and is emulated through the shadow (~9 us each). The native recompiled
+    // code reads the game's read-only data (XEX code/rdata sections at load, and whatever the game
+    // marks read-only at runtime via NtProtectVirtualMemory / MmSetAddressProtect) constantly: on
+    // Halo 3 that was ~113,000 read faults/s (profiler: "lectura emulada"), collapsing FPS to ~0 and
+    // starving audio. Nothing here needs read-only protection on the Switch - recompiled code is
+    // native (it never executes the guest code pages), the deko renderer tracks GPU coherence by
+    // hashing (x360/deko/texturas.cpp), and these titles use no write-watch - so a read-only request
+    // is kept mapped read-write instead (unprotected guest memory + hashing, as haloce-nx/the archive
+    // do). No-access (REX_GM_NONE: the zero page, guard/released pages) is left unmapped as before -
+    // those are not read, so they do not storm.
+    if (access == REX_GM_READ) {
+        access = REX_GM_WRITE;
+    }
+
     const uint64_t addr  = reinterpret_cast<uint64_t>(address);
     const uint64_t wbase = reinterpret_cast<uint64_t>(s.base);
     if (addr < wbase || addr + length > wbase + s.size) return false;
