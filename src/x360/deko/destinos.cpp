@@ -1055,8 +1055,28 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       const uint32_t ancho_resolve = uint32_t(x1 - x0);
       const uint32_t ancho_textura =
           x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
-      resuelta = ObtenerResuelta(base & 0x1FFFFFFF, ancho_textura, alto_destino, formato_destino,
-                                 (info_destino >> 24) & 0x1, false);
+      // Predicated tiling (Halo 3): the frame is drawn in bands of EDRAM and each band is resolved into its rows of one
+      // texture, with the destination base moved down to the band and the height left below it as the destination
+      // height (640, then 480, 320, 160). A base a whole number of 32-row tile rows below a texture resolved from its
+      // top, of the same width, whose rows down plus that height make its height, is that texture at those rows.
+      const uint64_t fila_baldosas = uint64_t((pitch_destino + 31) / 32) * 4096;  // 32 rows of 4-byte texels
+      for (auto& [b, r] : resueltas_) {
+        if (b >= base_resuelta || r.imagen.profundidad || r.imagen.ancho != ancho_textura) {
+          continue;
+        }
+        const uint64_t d = base_resuelta - b;
+        if (d % fila_baldosas == 0 && (d / fila_baldosas) * 32 + alto_destino == r.imagen.alto) {
+          dy += uint32_t(d / fila_baldosas) * 32;
+          base_resuelta = b;
+          resuelta = &r;
+          ++bandas_resueltas_;
+          break;
+        }
+      }
+      if (!resuelta) {
+        resuelta = ObtenerResuelta(base & 0x1FFFFFFF, ancho_textura, alto_destino, formato_destino,
+                                   (info_destino >> 24) & 0x1, false);
+      }
     }
     if (resuelta) {
       const uint32_t pedido_ancho = std::min(uint32_t(x1 - x0), destino_render->ancho - uint32_t(x0));
@@ -1974,8 +1994,9 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
                      par.second.imagen.alto, (unsigned long long)par.second.imagen.version,
                      par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
       }
-      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu causas:", ultimo_frontal_,
-                   (unsigned long long)rechazados_, (unsigned long long)copias_3d_);
+      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu bandas=%llu causas:", ultimo_frontal_,
+                   (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
+                   (unsigned long long)bandas_resueltas_);
       for (const auto& c : causas_) {
         std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
       }

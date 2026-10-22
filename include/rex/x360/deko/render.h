@@ -435,6 +435,7 @@ class RenderDk final : public DestinosNativos {
   std::unordered_map<uint64_t, ImagenDk> destinos_;
   std::unordered_map<uint64_t, ImagenDk> profundidades_;
   std::unordered_map<uint32_t, Resuelta> resueltas_;
+  uint64_t bandas_resueltas_ = 0;  // resolves of a predicated-tiling band into a texture's lower rows
   // Resolved textures displaced from resueltas_ by another size at the same address, by ClaveOtra (base and size):
   // Halo 3 resolves the 1152x640 scene and a 288x160 downscale to the same address every frame, and both are
   // sampled. Swapped back into resueltas_ when that size is resolved again, so neither is recreated every frame.
