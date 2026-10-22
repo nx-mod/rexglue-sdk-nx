@@ -367,6 +367,16 @@ GlslDeko GlslDeTraductor(std::string_view texto, bool vertices, uint32_t especia
       r.ubos |= 1u << numero;
     }
   }
+  for (size_t at = texto.find("\n// xeno_vf "); at != std::string_view::npos; at = texto.find("\n// xeno_vf ", at + 1)) {
+    unsigned enlace = 0, slot = 0, zancada = 0;
+    int minimo = 0, maximo = 0;
+    const std::string linea(texto.substr(at + 12, texto.find('\n', at + 1) - at - 12));
+    if (std::sscanf(linea.c_str(), "%u %u %u %d %d", &enlace, &slot, &zancada, &minimo, &maximo) == 5 && enlace < 16) {
+      r.zancada_vf[enlace] = zancada;
+      r.minimo_vf[enlace] = minimo;
+      r.maximo_vf[enlace] = maximo;
+    }
+  }
   char cabecera[96];
   std::snprintf(cabecera, sizeof(cabecera), "#version 460\n#define G_ESPECIALIZACION 0x%08Xu\n", especializacion);
   r.glsl.reserve(texto.size() + 64);

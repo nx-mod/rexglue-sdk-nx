@@ -43,6 +43,10 @@ struct GlslDeko {
   // slots_vf[N] = the vertex fetch slot it holds (from the name).
   uint32_t buffers = 0;
   std::array<uint8_t, 16> slots_vf{};
+  // What each of those reads around vertex i (the translator's "// xeno_vf" lines): dwords i * stride + [min, max).
+  // Stride 0 = unknown or mixed: the whole buffer.
+  std::array<uint32_t, 16> zancada_vf{};
+  std::array<int32_t, 16> minimo_vf{}, maximo_vf{};
   std::string error;
   // Shapes that compile but that uam is known to get wrong (HowToDeko3d.md, section 6): a dynamic component
   // index into a UBO vector. One line each; the caller logs them.

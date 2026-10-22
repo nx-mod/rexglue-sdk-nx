@@ -380,6 +380,9 @@ class RenderDk final : public DestinosNativos {
     uint32_t ubos = 0;                 // bit N: reads the UBO at binding N (3 = Halo 3's booleans and loops)
     uint32_t buffers = 0;              // bit N: reads storage buffer N (a vertex fetch with no element)
     std::array<uint8_t, 16> slots_vf{};  // the vertex fetch slot of each storage buffer
+    // What each buffer reads per vertex (GlslDeko's zancada_vf / minimo_vf / maximo_vf); stride 0 = the whole buffer.
+    std::array<uint32_t, 16> zancada_vf{};
+    std::array<int32_t, 16> minimo_vf{}, maximo_vf{};
   };
   InfoShader& InfoDe(const EntradaShader& entrada);
   void RecogerCompilaciones();

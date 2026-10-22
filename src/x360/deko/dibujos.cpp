@@ -908,6 +908,9 @@ RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
       info.ubos = g.ubos;
       info.buffers = g.buffers;
       info.slots_vf = g.slots_vf;
+      info.zancada_vf = g.zancada_vf;
+      info.minimo_vf = g.minimo_vf;
+      info.maximo_vf = g.maximo_vf;
       info.interpoladores_listos = true;
     }
     return info;
@@ -1606,6 +1609,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     const uint8_t* datos;
     xenos::Endian orden;
     uint32_t bytes;
+    uint32_t inicio;  // bytes of the guest buffer before what is uploaded (bound that much earlier)
   };
   std::array<BuferVf, 32> buferes_vf;
   uint32_t n_buferes_vf = 0, bytes_buferes_vf = 0;
@@ -1627,10 +1631,21 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       if ((d0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex) || uint64_t(direccion) + bytes > kMemoriaFisica) {
         bytes = 0;  // bound as an empty buffer: the loads read zeros
       }
+      // A vertex shader reads dwords i * stride + [min, max) for the draw's vertices i = vmin..vmax: only those are
+      // uploaded (the whole buffer every draw was 120 MB a frame in Halo 3's menu). From a 256-byte boundary, so the
+      // binding that starts that much earlier keeps the shader's absolute indices.
+      uint32_t inicio = 0;
+      if (bytes && e->vertices && info.zancada_vf[b]) {
+        const int64_t z = info.zancada_vf[b];
+        const int64_t desde = (int64_t(vmin) * z + info.minimo_vf[b]) * 4;
+        const int64_t hasta = (int64_t(vmax) * z + info.maximo_vf[b]) * 4;
+        inicio = uint32_t(std::clamp<int64_t>(desde, 0, bytes)) & ~255u;
+        bytes = uint32_t(std::clamp<int64_t>(hasta, inicio, bytes)) - inicio;
+      }
       bytes = std::min<uint32_t>(bytes, 4u << 20);
       buferes_vf[n_buferes_vf++] = {e->vertices ? DkStage_Vertex : DkStage_Fragment, b,
-                                    bytes ? memoria_->TranslatePhysical(direccion) : nullptr,
-                                    static_cast<xenos::Endian>(d1 & 0x3), bytes};
+                                    bytes ? memoria_->TranslatePhysical(direccion + inicio) : nullptr,
+                                    static_cast<xenos::Endian>(d1 & 0x3), bytes, inicio};
       bytes_buferes_vf += ((std::max(bytes, 16u) + 255) & ~255u) + DK_UNIFORM_BUF_ALIGNMENT;
     }
   }
@@ -1665,7 +1680,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     if (v.bytes) {
       CopiarVertices(TrabajoCopia{v.datos, s.cpu, v.bytes / 4, v.orden});  // byte-swapped as vertex data
     }
-    dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu, tam);
+    dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu - v.inicio, tam + v.inicio);
   }
   if (bloque_halo) {
     // 256 booleans (8 words at 0x4900) then the 32 loop constants (0x4908): halo3_shader_common.h's block.
