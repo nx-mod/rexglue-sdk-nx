@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 
 #include <rex/cvar.h>
 #include <rex/filesystem/device.h>
@@ -754,9 +755,23 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
     if (true || file->is_synchronous()) {
       // Synchronous.
       uint32_t bytes_read = 0;
+      const uint64_t desplazamiento =
+          byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file->position();
+      const uint64_t io_inicio_us = AhoraUs();
       result = file->ReadScatter(segment_array.guest_address(), length,
                                  byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
                                  &bytes_read, apc_context.guest_address());
+      const uint64_t io_fin_us = AhoraUs();
+      // In the [io] summaries with the plain reads, and named once on stderr: whether a game streams this way at all.
+      AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
+      QuizaResumenIo(io_fin_us);
+      static std::atomic<uint32_t> avisadas{0};
+      if (avisadas.fetch_add(1, std::memory_order_relaxed) < 4) {
+        std::fprintf(stderr, "[io] lectura dispersa (NtReadFileScatter): %s, %u bytes en %llu, %s, apc %s\n",
+                     std::string(file->path()).c_str(), uint32_t(length), (unsigned long long)desplazamiento,
+                     file->is_synchronous() ? "sincrona" : "asincrona",
+                     ((uint32_t)apc_routine_ptr & ~1u) ? "si" : "no");
+      }
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;

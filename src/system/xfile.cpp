@@ -223,12 +223,12 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length, ui
     }
 
     uint32_t bytes_read = 0;
-    result = ReadInternal(
-        read_buffer, read_length,
-        byte_offset
-            ? ((byte_offset != -1 && byte_offset != -2) ? byte_offset + read_total : byte_offset)
-            : -1,
-        &bytes_read, apc_context, false);
+    // -1 and -2 mean the file's own position; any other value, 0 included, is an offset (the old
+    // `byte_offset ? ... : -1` read a scatter request at offset 0 from wherever the position was).
+    result = ReadInternal(read_buffer, read_length,
+                          (byte_offset != uint64_t(-1) && byte_offset != uint64_t(-2)) ? byte_offset + read_total
+                                                                                         : byte_offset,
+                          &bytes_read, apc_context, false);
 
     if (result != X_STATUS_SUCCESS) {
       break;
