@@ -252,8 +252,26 @@ void RenderDk::EscribirDescriptorImagen(uint32_t ranura, const DkImageView& vist
                    sizeof(d));
 }
 
-uint32_t RenderDk::VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint16_t swizzle_host) {
-  const uint64_t clave = (imagen.serie << 24) ^ (uint64_t(swizzle_guest & 0xFFF) << 12) ^ swizzle_host;
+// The sRGB format of an image format, or None: the Xenos's gamma is a piecewise-linear curve close to sRGB's.
+DkImageFormat FormatoSrgb(DkImageFormat formato) {
+  switch (formato) {
+    case DkImageFormat_RGBA8_Unorm:
+      return DkImageFormat_RGBA8_Unorm_sRGB;
+    case DkImageFormat_RGBA_BC1:
+      return DkImageFormat_RGBA_BC1_sRGB;
+    case DkImageFormat_RGBA_BC2:
+      return DkImageFormat_RGBA_BC2_sRGB;
+    case DkImageFormat_RGBA_BC3:
+      return DkImageFormat_RGBA_BC3_sRGB;
+    default:
+      return DkImageFormat_None;
+  }
+}
+
+uint32_t RenderDk::VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint16_t swizzle_host, bool gamma) {
+  const DkImageFormat srgb = gamma && !imagen.profundidad ? FormatoSrgb(imagen.formato) : DkImageFormat_None;
+  const uint64_t clave = (imagen.serie << 24) ^ (uint64_t(swizzle_guest & 0xFFF) << 12) ^ swizzle_host ^
+                         (srgb != DkImageFormat_None ? UINT64_C(1) << 63 : 0);
   if (const auto it = vistas_.find(clave); it != vistas_.end()) {
     return it->second;
   }
@@ -264,6 +282,9 @@ uint32_t RenderDk::VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint1
   }
   DkImageView v;
   dkImageViewDefaults(&v, &imagen.imagen);
+  if (srgb != DkImageFormat_None) {
+    v.format = srgb;
+  }
   Swizzle(swizzle_guest, swizzle_host, v.swizzle);
   if (imagen.profundidad) {
     v.dsSource = DkDsSource_Depth;
@@ -458,8 +479,16 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     Avisar(29, "la dimension de la textura no es la que declara el shader: se usa una vacia");
     return VaciaDe(tipo_shader);
   }
-  if ((f[0] >> 2) & 0xFF) {
-    Avisar(31, "texturas con signo o gamma: se leen sin signo");
+  // Signs, two bits per channel from bit 2 (X, Y, Z, W): 1 signed, 2 biased, 3 gamma. Gamma on the colour channels is
+  // read through an sRGB view, which decodes as the Xenos does (Halo 3 draws nearly everything into 8_8_8_8_GAMMA
+  // targets, now stored encoded, and reads them back this way); signed and biased are still read unsigned.
+  const uint32_t signos = (f[0] >> 2) & 0xFF;
+  const bool gamma = (signos & 0x3) == 3 || ((signos >> 2) & 0x3) == 3 || ((signos >> 4) & 0x3) == 3;
+  for (uint32_t c = 0; c < 4; ++c) {
+    const uint32_t signo = (signos >> (c * 2)) & 0x3;
+    if (signo == 1 || signo == 2) {
+      Avisar(31, "texturas con signo: se leen sin signo");
+    }
   }
   const uint32_t swizzle = (f[3] >> 1) & 0xFFF;
   const uint32_t base = (f[1] >> 12) << 12;
@@ -475,7 +504,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
       }
       // The emulation's copy swaps channels in memory (copy_dest_swap) and the fetch swizzle undoes it; here the copy
       // is image to image, so the swap goes into the host channels.
-      return VistaDe(*resuelta, swizzle, resuelta->intercambio_rb ? kSwizzleBGRA : kSwizzleRGBA);
+      return VistaDe(*resuelta, swizzle, resuelta->intercambio_rb ? kSwizzleBGRA : kSwizzleRGBA, gamma);
     }
   }
   const uint32_t formato = f[1] & 0x3F;
@@ -625,7 +654,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
       }
       ancho_out = cubo_resuelto.imagen.ancho;
       alto_out = cubo_resuelto.imagen.alto;
-      return VistaDe(cubo_resuelto.imagen, swizzle, caras[0]->intercambio_rb ? kSwizzleBGRA : kSwizzleRGBA);
+      return VistaDe(cubo_resuelto.imagen, swizzle, caras[0]->intercambio_rb ? kSwizzleBGRA : kSwizzleRGBA, gamma);
     }
   }
 
@@ -654,7 +683,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
                   ((f[0] >> 22) & 0x1FF) << 5, swizzle, cubo ? " (cubo)" : volumen ? " (3D)" : apilada ? " (pila como 3D)" : "", niveles);
     }
   }
-  const uint32_t ranura = VistaDe(textura.imagen, swizzle, tf.swizzle_host);
+  const uint32_t ranura = VistaDe(textura.imagen, swizzle, tf.swizzle_host, gamma);
   // Until its next check nothing about it changes: the draws' per-fetch cache keeps the answer that long.
   auto listo = [&]() {
     valido_hasta = textura.siguiente > fotograma_ ? textura.siguiente - 1 : fotograma_;

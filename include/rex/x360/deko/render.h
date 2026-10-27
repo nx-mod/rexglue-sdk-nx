@@ -406,7 +406,8 @@ class RenderDk final : public DestinosNativos {
   // check; resolved textures and cubemaps, this frame only).
   uint32_t PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint32_t& ancho, uint32_t& alto, bool& puntual,
                            uint64_t& valido_hasta);
-  uint32_t VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint16_t swizzle_host);
+  // `gamma`: read through the format's sRGB view (a fetch whose RGB signs are gamma), when it has one.
+  uint32_t VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint16_t swizzle_host, bool gamma = false);
   uint32_t SamplerDe(const uint32_t* f, bool puntual);
   uint32_t VaciaDe(uint16_t tipo_shader) const;
   bool LeerNivel(uint64_t direccion, bool mosaico, uint32_t pitch_bloques, uint64_t fila_bytes, const FormatoDk& tf,

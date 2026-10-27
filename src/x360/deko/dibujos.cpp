@@ -714,6 +714,11 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   for (uint32_t i = 0; i < 4; ++i) {
     if (imagenes[i]) {
       dkImageViewDefaults(&vistas[n], &imagenes[i]->imagen);
+      // k_8_8_8_8_GAMMA: the Xenos writes it gamma-encoded, and a resolve as 8_8_8_8 copies those bytes on (Halo 3's
+      // whole frame). Drawn through the image's sRGB view, so the GPU encodes the same way.
+      if (((claves[i] >> 16) & 0xF) == 1 && imagenes[i]->formato == DkImageFormat_RGBA8_Unorm) {
+        vistas[n].format = DkImageFormat_RGBA8_Unorm_sRGB;
+      }
       colores[n] = &vistas[n];
       ++n;
       ancho = std::min(ancho, imagenes[i]->ancho);
