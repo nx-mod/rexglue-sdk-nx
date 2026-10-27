@@ -306,14 +306,30 @@ void main() {
 )";
 
 // The 3D engine's copies (Copiar3D): the source's texel at this pixel plus the offset, as color or as depth.
+// Mode 1: the Xenos's 7e3 bits of each colour channel read as unorm (a 7e3 drawing copied as 2_10_10_10: the EDRAM
+// holds the bits), with Xenia's conversion (spirv_translator_rb.cpp, PreClampedFloat32To7e3: round to nearest even);
+// alpha is the format's 2 bits. Then, in both modes, the copy's 2^exp_bias (RB_COPY_DEST_INFO), as Xenia's resolve.
 constexpr const char* kFsCopiaColor = R"(#version 460
 layout(binding = 0) uniform sampler2D origen;
 layout(std140, binding = 0) uniform Copia {
   ivec4 desplazamiento;
+  ivec4 modo;
+  vec4 escala;
 } copia;
 layout(location = 0) out vec4 color;
+uint a7e3(float f) {
+  uint u = floatBitsToUint(clamp(f, 0.0, 31.875));
+  uint subnormal = ((u & 0x7FFFFFu) | 0x800000u) >> min(125u - min(u >> 23, 125u), 24u);
+  uint b = u < 0x3E800000u ? subnormal : u - (124u << 23);
+  return ((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16) & 0x3FFu;
+}
 void main() {
-  color = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
+  vec4 v = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
+  if (copia.modo.x == 1) {
+    v = vec4(float(a7e3(v.r)), float(a7e3(v.g)), float(a7e3(v.b)), 0.0) / 1023.0 +
+        vec4(0.0, 0.0, 0.0, round(clamp(v.a, 0.0, 1.0) * 3.0) / 3.0);
+  }
+  color = v * copia.escala.x;
 }
 )";
 constexpr const char* kFsCopiaProfundidad = R"(#version 460
@@ -575,7 +591,7 @@ void RenderDk::AntesDe3D() {
 }
 
 bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
-                        ImagenDk& destino, uint32_t dx, uint32_t dy) {
+                        ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala) {
   const bool z = destino.profundidad;
   if (!vs_salida_valido_ || !(z ? fs_copia_profundidad_valido_ : fs_copia_color_valido_)) {
     return false;
@@ -587,7 +603,11 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
     return false;
   }
   const int32_t desplazamiento[4] = {int32_t(x0) - int32_t(dx), int32_t(y0) - int32_t(dy), 0, 0};
+  const int32_t modos[4] = {modo, 0, 0, 0};
+  const float escalas[4] = {escala, 0.0f, 0.0f, 0.0f};
   std::memcpy(ubo.cpu, desplazamiento, sizeof(desplazamiento));
+  std::memcpy(ubo.cpu + 16, modos, sizeof(modos));
+  std::memcpy(ubo.cpu + 32, escalas, sizeof(escalas));
   const uint32_t ranura = VistaDe(origen, 0x688, z ? 0 /* RRRR */ : 0x688);
   DkCmdBuf cmd = nucleo_.comandos();
   MarcarGpu(kGpuCopias);
@@ -748,7 +768,10 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   // and copies as 8_8_8_8 out of the same tiles). Every format here is RGBA8 on the host, so the key only tells the
   // 32-bit formats from the 64-bit ones (16_16_16_16 and its float, 5 and 7), whose tiles hold half the pixels.
   static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
-  const bool flotante = con_flotantes && DestinoFlotante(formato);
+  // With them on, the 2_10_10_10 family too (2, 3 = 7e3, 10, 12 = 7e3 as 16_16_16_16): one float image per base, so a
+  // 7e3 drawing keeps its [0, 32) range and its copies as 2_10_10_10 read the same image (Halo 3's tone-mapped frame).
+  const bool flotante =
+      con_flotantes && (DestinoFlotante(formato) || formato == 2 || formato == 3 || formato == 10 || formato == 12);
   const uint32_t clase = ((formato == 5 || formato == 7) ? 1u : 0u) | (flotante ? 2u : 0u);
   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
   if (auto it = destinos_.find(clave); it != destinos_.end()) {
@@ -1037,9 +1060,10 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   const uint32_t formato_color = (info_color >> 16) & 0xF;
   if (volcando_captura_) {  // the capture's draw list also shows the copies, in order
     volcado_dibujos_.push_back(fmt::format(
-        "  c copia de {:03X}/f{} pitch {} -> {:08X} f{} pitch {} | copiar {} borrar color {} z {} valor {:08X}",
+        "  c copia de {:03X}/f{} pitch {} -> {:08X} f{} pitch {} sesgo {} | copiar {} borrar color {} z {} valor {:08X}",
         info_color & 0xFFF, formato_color, pitch, reg.rb_copy_dest_base, (reg.rb_copy_dest_info >> 7) & 0x3F,
-        reg.rb_copy_dest_pitch & 0x3FFF, comando, (control >> 8) & 1, (control >> 9) & 1, reg.rb_color_clear));
+        reg.rb_copy_dest_pitch & 0x3FFF, int32_t(reg.rb_copy_dest_info << 10) >> 26, comando, (control >> 8) & 1,
+        (control >> 9) & 1, reg.rb_color_clear));
     if (volcado_dibujos_.size() > 2500) {
       volcado_dibujos_.pop_front();
     }
@@ -1108,8 +1132,19 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       // nfsmw_nativo_frontal_perezoso: the whole scene to the front buffer of the last Swap, not read back.
       const int32_t maximo_lectura = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
       const bool se_lee = maximo_lectura > 0 && uint64_t(ancho) * alto <= uint64_t(maximo_lectura);
+      // What the copy does to the values (Copiar3D): a 7e3 drawing read as 2_10_10_10 hands on its bits, and every color
+      // copy scales by 2^RB_COPY_DEST_INFO.copy_dest_exp_bias (signed, bits 16-21; Halo 3 copies its 7e3 frame out
+      // with -5). Either needs the 3D engine: a raw copy or the lazy front buffer would hand on the plain value.
+      const int32_t sesgo = int32_t(reg.rb_copy_dest_info << 10) >> 26;
+      const float escala = std::ldexp(1.0f, sesgo);
+      const bool bits_7e3 = (formato_color == 2 || formato_color == 10) &&
+                            (destino_render->formato_dibujo == 3 || destino_render->formato_dibujo == 12) &&
+                            destino_render->formato == DkImageFormat_RGBA16_Float;
+      const int32_t modo_copia = bits_7e3 ? kCopia7e3 : kCopiaValor;
+      const bool transforma = bits_7e3 || sesgo != 0;
       static const bool frontal_perezoso = REXCVAR_GET(nfsmw_nativo_frontal_perezoso);
       const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
+                           !transforma &&
                            !se_lee && x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == resuelta->imagen.ancho &&
                            alto == resuelta->imagen.alto;
       // What the resolve reads must be there: the useful area grows to it, a pending clear is done, the band too.
@@ -1137,8 +1172,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
         // Different host formats (a float target to an 8-bit texture or back) only on the 3D engine or the blit:
         // the copy engine moves bytes.
         const bool mismo_formato = destino_render->formato == resuelta->imagen.formato;
-        if (encoger || (se_lee && mismo_formato) ||
-            !Copiar3D(*destino_render, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy)) {
+        if ((!transforma && (encoger || (se_lee && mismo_formato))) ||
+            !Copiar3D(*destino_render, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy, modo_copia,
+                      escala)) {
           MarcarGpu(kGpuCopias);
           AntesDeTransferir();
           if (!encoger && !mismo_formato) {

@@ -83,6 +83,9 @@ struct ImagenDk {
   //    pass valid; or before the target is copied or swapped.
   bool contenido_invalido = false;
   uint32_t resuelta_base = 0;
+  // The ColorRenderTargetFormat this target was last drawn in (0xFF: never): a copy reading a 7e3 drawing as
+  // 2_10_10_10 hands on its 7e3 bits (Copiar).
+  uint8_t formato_dibujo = 0xFF;
   bool borrado_pendiente = false;
   float borrado_z = 1.0f;
   uint8_t borrado_estencil = 0;
@@ -207,8 +210,11 @@ class RenderDk final : public DestinosNativos {
   // engine (0.78 ms per Mpixel), keeps compressed images compressed, and orders against draws with Fragments barriers
   // instead of Full ones. rop_sin_barrera_: render target writes since the last barrier that made them visible to
   // sampling; copia3d_pendiente_: a copy since then, which the next draw or clear waits for.
+  // `modo`: kCopiaValor (times `escala`, the copy's 2^exp_bias) or kCopia7e3 (each colour channel's 7e3 bits as unorm,
+  // then times `escala`).
+  static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1;
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
-                uint32_t dx, uint32_t dy);
+                uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);
   bool rop_sin_barrera_ = true;
   bool copia3d_pendiente_ = false;
   uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0;

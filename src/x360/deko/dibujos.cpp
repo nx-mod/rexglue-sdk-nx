@@ -719,6 +719,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
       if (((claves[i] >> 16) & 0xF) == 1 && imagenes[i]->formato == DkImageFormat_RGBA8_Unorm) {
         vistas[n].format = DkImageFormat_RGBA8_Unorm_sRGB;
       }
+      imagenes[i]->formato_dibujo = uint8_t((claves[i] >> 16) & 0xF);
       colores[n] = &vistas[n];
       ++n;
       ancho = std::min(ancho, imagenes[i]->ancho);
