@@ -348,6 +348,7 @@ class RenderDk final : public DestinosNativos {
     uint32_t ancho = 0, alto = 0;
     uint32_t pitch = 0, alto_destino = 0;  // RB_COPY_DEST_PITCH
     uint32_t info = 0;                     // RB_COPY_DEST_INFO
+    uint32_t bytes_texel = 4;              // 4: RGBA8; 8: RGBA16F (16_16_16_16_FLOAT, Halo 3's exposure)
   };
   struct LecturasRanura {
     std::vector<LecturaDk> pendientes;

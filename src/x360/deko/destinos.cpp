@@ -1787,11 +1787,17 @@ const ImagenDk* RenderDk::CompaneraSombraCoches(bool capaz, uint32_t ps) {
 void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, int32_t x0, int32_t y0, uint32_t dx,
                             uint32_t dy, uint32_t ancho, uint32_t alto) {
   const int32_t maximo = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
-  if (maximo <= 0 || uint64_t(ancho) * alto > uint64_t(maximo) || imagen.formato != DkImageFormat_RGBA8_Unorm) {
+  // RGBA8, and RGBA16F: Halo 3 measures its exposure in 16_16_16_16_FLOAT copies that its CPU reads back. Before
+  // these were read back, the CPU read nothing (black scene) or, with 8-bit targets, an 8-bit layout where it
+  // expected 8 bytes of half floats (a white scene).
+  const bool flotante = imagen.formato == DkImageFormat_RGBA16_Float;
+  if (maximo <= 0 || uint64_t(ancho) * alto > uint64_t(maximo) ||
+      (imagen.formato != DkImageFormat_RGBA8_Unorm && !flotante)) {
     return;
   }
+  const uint32_t bytes_texel = flotante ? 8 : 4;
   LecturasRanura& l = lecturas_[trabajo_ % kRanuras];
-  const uint32_t bytes = ancho * alto * 4;
+  const uint32_t bytes = ancho * alto * bytes_texel;
   if (l.usados + bytes > kBytesLecturaRanura) {
     if (lecturas_sin_sitio_++ == 0) {
       REXLOG_WARN("[deko3d] lecturas de vuelta: no caben mas en la ranura ({} KB); el juego vera la anterior",
@@ -1804,12 +1810,12 @@ void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, i
   dkMemBlockFlushCpuCache(lectura_bloque_, offset, bytes);  // nothing of it stays in the CPU's cache
   const DkImageView vista = VistaCompleta(imagen.imagen);
   const DkImageRect rect = {dx, dy, 0, ancho, alto, 1};
-  const DkCopyBuf destino = {lectura_gpu_ + offset, ancho * 4, ancho * 4 * alto};
+  const DkCopyBuf destino = {lectura_gpu_ + offset, ancho * bytes_texel, ancho * bytes_texel * alto};
   // A transfer like the resolve: the copy engine runs them in order, and CerrarTrabajo waits for it before the fence.
   AntesDeTransferir();
   dkCmdBufCopyImageToBuffer(nucleo_.comandos(), &vista, &rect, &destino, 0);
   l.pendientes.push_back({offset, reg.rb_copy_dest_base, x0, y0, ancho, alto, reg.rb_copy_dest_pitch & 0x3FFF,
-                          (reg.rb_copy_dest_pitch >> 16) & 0x3FFF, reg.rb_copy_dest_info});
+                          (reg.rb_copy_dest_pitch >> 16) & 0x3FFF, reg.rb_copy_dest_info, bytes_texel});
   if (lecturas_hechas_++ == 0) {
     REXLOG_INFO("[deko3d] lectura de vuelta de texturas resueltas de hasta {} texels (la primera: {:08X}, {}x{})",
                 maximo, reg.rb_copy_dest_base, ancho, alto);
@@ -1827,11 +1833,44 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
   uint8_t* const fisica = memoria_->TranslatePhysical(0);
   const auto& tabla = TablaMosaico2DTexel4();
   for (const LecturaDk& p : l.pendientes) {
-    dkMemBlockFlushCpuCache(lectura_bloque_, p.offset, p.ancho * p.alto * 4);  // what the GPU wrote, not the cache
+    dkMemBlockFlushCpuCache(lectura_bloque_, p.offset, p.ancho * p.alto * p.bytes_texel);  // the GPU's, not the cache
     const uint8_t* const datos = lectura_cpu_ + p.offset;
     const bool intercambio = (p.info >> 24) & 0x1;
     const uint32_t orden_copia = p.info & 0x7;  // Endian128: 0-3 as xenos::Endian
     const auto orden = orden_copia <= 3 ? static_cast<xenos::Endian>(orden_copia) : xenos::Endian::k8in32;
+    if (p.bytes_texel == 8) {
+      // 16_16_16_16_FLOAT: R, G, B, A as 16-bit halves in the GPU's order (the host image's), red and blue swapped
+      // with copy_dest_swap, then the copy's byte order on each 32-bit word, as the 8-bit path does with its marked
+      // bytes; 8-byte texels tiled in 32x32 blocks.
+      const uint64_t base = uint64_t(p.base & 0x1FFFFFFF);
+      for (uint32_t j = 0; j < p.alto; ++j) {
+        const uint32_t ty = uint32_t(p.y0) + j;
+        if (p.alto_destino && ty >= p.alto_destino) {
+          break;
+        }
+        for (uint32_t i = 0; i < p.ancho; ++i) {
+          const uint32_t tx = uint32_t(p.x0) + i;
+          if (tx >= p.pitch) {
+            break;
+          }
+          const uint64_t direccion =
+              base + uint64_t(uint32_t(DesplazamientoMosaico2D(int32_t(tx), int32_t(ty), p.pitch, 3)));
+          if (direccion + 8 > 0x20000000) {
+            continue;
+          }
+          uint16_t h[4];
+          std::memcpy(h, datos + (size_t(j) * p.ancho + i) * 8, 8);
+          if (intercambio) {
+            std::swap(h[0], h[2]);
+          }
+          const uint32_t w[2] = {xenos::GpuSwap(uint32_t(h[0]) | (uint32_t(h[1]) << 16), orden),
+                                 xenos::GpuSwap(uint32_t(h[2]) | (uint32_t(h[3]) << 16), orden)};
+          std::memcpy(fisica + direccion, w, 8);
+        }
+      }
+      ++lecturas_escritas_;
+      continue;
+    }
     // Each texel is a permutation of its 4 bytes (R/B swap plus GpuSwap), computed once with marked bytes.
     const uint32_t permutacion = xenos::GpuSwap(intercambio ? uint32_t(0x03000102) : uint32_t(0x03020100), orden);
     const uint8_t b0 = uint8_t(permutacion), b1 = uint8_t(permutacion >> 8), b2 = uint8_t(permutacion >> 16),
