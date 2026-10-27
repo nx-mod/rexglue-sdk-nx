@@ -142,7 +142,7 @@ constexpr uint32_t kPalabraInvTamano = 90;
 constexpr uint32_t kMaxVerticesPorDibujo = uint32_t(1) << 20;
 constexpr uint32_t kUboBytesVs = 256 * 16;
 constexpr uint32_t kUboBytesPs = 256 * 16;  // NFS reads 224, Halo 3 all 256
-constexpr uint32_t kUboBytesCompartidas = 31 * 16;
+constexpr uint32_t kUboBytesCompartidas = 32 * 16;
 constexpr uint32_t kTodasLasSalidas = ~0u;
 
 // The 16-byte registers of [desde, hasta) (bytes) that differ from `sombra` are pushed into the block at `bloque` and
@@ -1808,6 +1808,15 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // shaders then remap z to the host's 0..w (Halo 3; NFS's shaders do not read it).
   const float z_opengl = (r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1 ? 0.0f : 1.0f;
   std::memcpy(&compartidas[123], &z_opengl, sizeof(z_opengl));
+  // Bytes 496-508: 2^RB_COLOR_INFO color_exp_bias (signed, bits 20-25) per render target, which the translator's pixel
+  // shaders multiply their outputs by (the Xenos scales what reaches a target; Halo 3 writes its final image to 7e3
+  // with +5 and copies it out with -5, which Copiar applies).
+  static constexpr uint32_t kInfoColorSesgo[4] = {gr::XE_GPU_REG_RB_COLOR_INFO, gr::XE_GPU_REG_RB_COLOR1_INFO,
+                                                  gr::XE_GPU_REG_RB_COLOR2_INFO, gr::XE_GPU_REG_RB_COLOR3_INFO};
+  for (uint32_t i = 0; i < 4; ++i) {
+    const float factor = std::ldexp(1.0f, int32_t(r[kInfoColorSesgo[i]] << 6) >> 26);
+    std::memcpy(&compartidas[124 + i], &factor, sizeof(factor));
+  }
 
   // --- The deferred sky (nfsmw_nativo_cielo_aplazado; the Vulkan path's criteria, explained there). The dome is the
   // sky's pixel shader, opaque, testing depth without writing it, no stencil, 480 indices, the first draw of the
