@@ -16,6 +16,12 @@
 
 namespace rex::system {
 
+// Switch: the game's audio producer (xevent.cpp). The audio system's worker marks itself; the events Halo 3's audio
+// callback waits on there are noted (KeWaitForMultipleObjects); the game thread that then sets one is the thread
+// that mixes the frames, and switch_subir_hilo_audio raises it.
+void MarcarHiloDeAudio();
+void AnotarEsperaDeAudio(class XObject* const* objetos, size_t n);
+
 // https://www.nirsoft.net/kernel_struct/vista/KEVENT.html
 struct X_KEVENT {
   X_DISPATCH_HEADER header;

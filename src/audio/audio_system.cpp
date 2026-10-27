@@ -26,6 +26,7 @@
 #include <rex/stream.h>
 #include <rex/string/buffer.h>
 #include <rex/system/thread_state.h>
+#include <rex/system/xevent.h>
 #include <rex/thread.h>
 #include <rex/cvar.h>
 
@@ -142,6 +143,7 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
 }
 
 void AudioSystem::WorkerThreadMain() {
+  rex::system::MarcarHiloDeAudio();  // its guest callback's waits find the game's audio producer (xevent.cpp)
   // Initialize driver and ringbuffer.
   Initialize();
 

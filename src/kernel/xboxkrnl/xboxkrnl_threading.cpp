@@ -884,6 +884,7 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
     objects.push_back(std::move(object_ref));
   }
 
+  rex::system::AnotarEsperaDeAudio(reinterpret_cast<XObject* const*>(objects.data()), objects.size());
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
