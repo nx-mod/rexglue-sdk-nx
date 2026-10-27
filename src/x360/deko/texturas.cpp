@@ -110,6 +110,18 @@ void DecodificarCtx1(const uint8_t* bloques, uint32_t bx, uint32_t by, uint32_t 
   }
 }
 
+// k_4_4_4_4 to RGBA8: each 16-bit texel (in host order) holds R in bits 0-3, G 4-7, B 8-11, A 12-15, the layout both
+// of Xenia's load shaders imply (the Vulkan one rotates it to B4G4R4A4, the D3D12 one swaps red and blue for DXGI's).
+void ExpandirRgba4(const uint8_t* origen, size_t texeles, uint8_t* rgba) {
+  for (size_t i = 0; i < texeles; ++i) {
+    uint16_t v;
+    std::memcpy(&v, origen + i * 2, 2);
+    for (uint32_t c = 0; c < 4; ++c) {
+      rgba[i * 4 + c] = uint8_t(((v >> (c * 4)) & 0xF) * 17);
+    }
+  }
+}
+
 // The original untiling, block by block (when the block is not a power of two bytes, which no format here has).
 void LeerNivelMosaicoDeSiempre(const uint8_t* origen, uint32_t pitch_bloques, uint32_t log2, uint32_t bytes, uint32_t ox,
                                uint32_t oy, uint32_t bx, uint32_t by, uint32_t bx_host, uint8_t* destino) {
@@ -136,6 +148,10 @@ bool RenderDk::FormatoDe(uint32_t formato, FormatoDk& f) {
     case 6:   // k_8_8_8_8
     case 50:  // k_8_8_8_8_AS_16_16_16_16
       f = {DkImageFormat_RGBA8_Unorm, 1, 4, 4, kSwizzleRGBA};
+      return true;
+    case 15:  // k_4_4_4_4: no 16-bit host format is filterable everywhere; RGBA8 expanded (ExpandirRgba4), as Xenia's
+              // Vulkan path falls back to (kLoadShaderIndexRGBA4ToRGBA8)
+      f = {DkImageFormat_RGBA8_Unorm, 1, 2, 2, kSwizzleRGBA, false, true};
       return true;
     case 7:   // k_2_10_10_10
     case 54:  // k_2_10_10_10_AS_16_16_16_16
@@ -434,7 +450,11 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     Avisar(30, "texturas 1D todavia no soportadas: se usa una vacia");
     return VaciaDe(tipo_shader);
   }
-  if (TipoVolumen(tipo_shader) != volumen || TipoCubo(tipo_shader) != cubo) {
+  // A 3D fetch (tfetch3D, k3DOrStacked) of a stacked 2D texture: Xenia samples it as a 2D array at layer z * depth,
+  // blending two layers when filtering (spirv_translator_fetch.cpp). A 3D image of the layers samples the same, so the
+  // stack is uploaded as one (Halo 3's full-screen passes read two 16x16 DXT5 stacks this way).
+  const bool apilada = !cubo && !volumen && TipoVolumen(tipo_shader) && !TipoCubo(tipo_shader);
+  if (!apilada && (TipoVolumen(tipo_shader) != volumen || TipoCubo(tipo_shader) != cubo)) {
     Avisar(29, "la dimension de la textura no es la que declara el shader: se usa una vacia");
     return VaciaDe(tipo_shader);
   }
@@ -443,7 +463,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   }
   const uint32_t swizzle = (f[3] >> 1) & 0xFFF;
   const uint32_t base = (f[1] >> 12) << 12;
-  if (!cubo && !volumen) {
+  if (!cubo && !volumen && !apilada) {
     if (const ImagenDk* resuelta = TexturaResuelta(base & 0x1FFFFFFF, (f[2] & 0x1FFF) + 1, ((f[2] >> 13) & 0x1FFF) + 1)) {
       // Resolved textures report their size like any other (without it the shadow PCF taps collapse).
       ancho_out = resuelta->ancho;
@@ -472,7 +492,9 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     Avisar(38, "textura 3D comprimida: se usa una vacia");
     return VaciaDe(tipo_shader);
   }
-  const uint32_t capas = cubo ? 6 : 1;
+  // size_stack: 13 + 13 + 6 bits, the stack's depth on top.
+  const uint32_t pila = apilada ? ((f[2] >> 26) & 0x3F) + 1 : 1;
+  const uint32_t capas = cubo ? 6 : pila;
   const uint32_t bloques_x = (ancho + tf.bloque - 1) / tf.bloque;
   const uint32_t bloques_y = (alto + tf.bloque - 1) / tf.bloque;
   const uint32_t pitch_bloques = std::max<uint32_t>((((f[0] >> 22) & 0x1FF) << 5) / tf.bloque, 1);
@@ -481,7 +503,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   const uint64_t zancada_cara =
       (uint64_t((pitch_bloques + 31) & ~uint32_t(31)) * tf.bytes * ((bloques_y + 31) & ~uint32_t(31)) + 4095) &
       ~uint64_t(4095);
-  const uint32_t claves[5] = {f[0] & 0xFFC003FC, f[1], f[2], (f[4] >> 2) & 0xFF, f[5] >> 9};
+  const uint32_t claves[5] = {f[0] & 0xFFC003FC, f[1], f[2], (f[4] >> 2) & 0xFF, (f[5] >> 9) | (apilada ? 1u << 31 : 0u)};
   const uint64_t clave = XXH3_64bits(claves, sizeof(claves));
 
   // Mip levels with the rules of GetSubresourcesFromFetchConstant: no mip address, no mips; the maximum clamped to the
@@ -494,7 +516,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
       mipmaps && !volumen && ((f[5] >> 11) & 0x1) ? NivelEmpaquetado(ancho, alto) : UINT32_MAX;
   uint32_t nivel_max = 0;
   bool leer_base = true;
-  if (mipmaps && !volumen && dir_mips != 0) {
+  if (mipmaps && !volumen && !apilada && dir_mips != 0) {
     const uint32_t tam_max = Log2Suelo(std::max(ancho, alto));
     uint32_t nivel_min = std::min((f[4] >> 2) & 0xFu, tam_max);
     nivel_max = std::max(std::min((f[4] >> 6) & 0xFu, tam_max), nivel_min);
@@ -613,8 +635,8 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     const uint32_t ancho_host = tf.bloque > 1 ? (ancho + 3) & ~uint32_t(3) : ancho;
     const uint32_t alto_host = tf.bloque > 1 ? (alto + 3) & ~uint32_t(3) : alto;
     const uint32_t niveles = std::min(nivel_max + 1, Log2Suelo(std::max(ancho_host, alto_host)) + 1);
-    if (!CrearImagen(textura.imagen, cubo ? DkImageType_Cubemap : volumen ? DkImageType_3D : DkImageType_2D,
-                     tf.formato, ancho_host, alto_host, volumen ? fondo : 1, niveles, 0, "textura")) {
+    if (!CrearImagen(textura.imagen, cubo ? DkImageType_Cubemap : volumen || apilada ? DkImageType_3D : DkImageType_2D,
+                     tf.formato, ancho_host, alto_host, volumen ? fondo : apilada ? pila : 1, niveles, 0, "textura")) {
       texturas_.erase(clave);
       Avisar(32, "no se pudo crear una textura");
       return VaciaDe(tipo_shader);
@@ -629,7 +651,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     if (texturas_creadas_ <= 48) {
       REXLOG_INFO("[deko3d] textura {:08X} {}x{} formato {} {} orden {} pitch {} swizzle {:03X}{}; niveles {}", base,
                   ancho, alto, formato, mosaico ? "en mosaico" : "lineal", (f[1] >> 6) & 0x3,
-                  ((f[0] >> 22) & 0x1FF) << 5, swizzle, cubo ? " (cubo)" : volumen ? " (3D)" : "", niveles);
+                  ((f[0] >> 22) & 0x1FF) << 5, swizzle, cubo ? " (cubo)" : volumen ? " (3D)" : apilada ? " (pila como 3D)" : "", niveles);
     }
   }
   const uint32_t ranura = VistaDe(textura.imagen, swizzle, tf.swizzle_host);
@@ -866,6 +888,30 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     desplazamiento_nivel = desplazamiento_rg;
     th.bloque = 1;
     th.bytes = 2;
+  }
+  // k_4_4_4_4: the untiled 16-bit texels become RGBA8, level by level.
+  if (tf.rgba4) {
+    // Cube faces and 3D slices alike (a 3D texture has its base level only).
+    const uint32_t laminas = capas * (fondo ? fondo : 1);
+    std::vector<uint8_t> texeles;
+    size_t total = 0;
+    std::array<size_t, 16> desplazamiento_rgba{};
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      desplazamiento_rgba[n] = total;
+      total += size_t(std::max(img.ancho >> n, 1u)) * std::max(img.alto >> n, 1u) * 4 * laminas;
+    }
+    texeles.assign(total, 0);
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      const size_t por_capa = size_t(std::max(img.ancho >> n, 1u)) * std::max(img.alto >> n, 1u);
+      for (uint32_t c = 0; c < laminas; ++c) {
+        ExpandirRgba4(temporal_.data() + desplazamiento_nivel[n] + bytes_capa_nivel[n] * c, por_capa,
+                      texeles.data() + desplazamiento_rgba[n] + por_capa * 4 * c);
+      }
+    }
+    temporal_.swap(texeles);
+    bytes_datos = total;
+    desplazamiento_nivel = desplazamiento_rgba;
+    th.bytes = 4;
   }
   // To the upload ring (it may move on to the next slot: the copies and the descriptors go with the slot they were
   // recorded in, and this texture's draws come after).
