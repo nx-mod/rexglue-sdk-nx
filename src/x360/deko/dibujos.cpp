@@ -1883,6 +1883,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     rs.frontFace = (modo_sc & 0x4) ? DkFrontFace_CW : DkFrontFace_CCW;
     rs.provokingVertex = DkProvokingVertex_First;  // the Vulkan path's
     rs.depthBiasEnableMask = con_sesgo ? DkPolygonFlag_All : 0;
+    // PA_CL_CLIP_CNTL clip_disable: the Xenos clips nothing, the host would still clip in depth. Depth clamp keeps
+    // such a draw whole (Direct3D's own clears, Halo 3's n2147483649: one triangle over four targets that, clipped,
+    // left the loading screen's additive lines to pile up into white).
+    rs.depthClampEnable = sin_recorte;
     if (!g_.valido || !Iguales(rs, g_.raster)) {
       dkCmdBufBindRasterizerState(cmd, &rs);
       g_.raster = rs;
