@@ -37,8 +37,9 @@ static void* native_memchr(const void* ptr, int val, size_t n) {
 // Xbox/VMX-optimized variants (same semantics, native speed)
 // ---------------------------------------------------------------------------
 
+// memmove: a game's own block copy hooked here may be called with overlapping ranges that its forward copy handled.
 static void* native_XMemCpy(void* dst, const void* src, size_t n) {
-  return std::memcpy(dst, src, n);
+  return std::memmove(dst, src, n);
 }
 
 static void* native_XMemSet(void* dst, int val, size_t n) {

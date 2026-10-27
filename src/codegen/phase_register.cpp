@@ -551,6 +551,15 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
   // Register CONFIG functions
   size_t configFuncs = 0, configChunks = 0;
   for (const auto& [address, cfg] : config.functions) {
+    // XenonAnalyse's function lists (Halo 3's) name every entry of the save/restore helpers as a plain function,
+    // `"0x8258E000" = {}`. Taking it would rename __restgprlr_14 to sub_8258E000, and with non_volatile_as_local the
+    // codegen would call it instead of eliding it. An entry that only says "a function starts here" leaves the helper.
+    if (cfg.name.empty() && !cfg.getSize(address) && !cfg.isChunk() && !cfg.shareRegisters) {
+      const auto* existing = graph.getFunction(address);
+      if (existing && existing->authority() == FunctionAuthority::HELPER) {
+        continue;
+      }
+    }
     uint32_t size = cfg.getSize(address);
     std::string name = cfg.name.empty() ? fmt::format("sub_{:08X}", address) : cfg.name;
     auto* node = graph.addFunction(address, size, FunctionAuthority::CONFIG, true);

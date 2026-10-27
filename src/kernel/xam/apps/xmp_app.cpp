@@ -10,6 +10,9 @@
  */
 
 #include <rex/kernel/xam/apps/xmp_app.h>
+
+#include <chrono>
+
 #include <rex/logging.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
@@ -21,6 +24,29 @@ using namespace rex::system;
 using namespace rex::system::xam;
 namespace apps {
 using namespace rex::system;
+
+namespace {
+
+// Some games poll XMP from a thread of their own in a tight loop, so Xenia sleeps on every call from any thread but
+// the title's main one. Halo 3 calls XMPGetPlaybackController from its game loop a few times per frame, on a thread
+// the kernel does not count as the main one: 10 ms a call was a third of its frame time (stack samples). So the
+// sleep is kept for a real tight loop only: more than kCallsPerWindow calls from one thread within one window.
+void ThrottleTightPoll(std::chrono::milliseconds delay) {
+  constexpr auto kWindow = std::chrono::milliseconds(16);
+  constexpr uint32_t kCallsPerWindow = 8;
+  thread_local std::chrono::steady_clock::time_point window_start;
+  thread_local uint32_t calls = 0;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - window_start >= kWindow) {
+    window_start = now;
+    calls = 0;
+  }
+  if (++calls > kCallsPerWindow) {
+    rex::thread::Sleep(delay);
+  }
+}
+
+}  // namespace
 
 XmpApp::XmpApp(KernelState* kernel_state)
     : App(kernel_state, 0xFA),
@@ -39,7 +65,7 @@ X_HRESULT XmpApp::XMPGetStatus(uint32_t state_ptr) {
   if (!XThread::GetCurrentThread()->main_thread()) {
     // Some stupid games will hammer this on a thread - induce a delay
     // here to keep from starving real threads.
-    rex::thread::Sleep(std::chrono::milliseconds(1));
+    ThrottleTightPoll(std::chrono::milliseconds(1));
   }
 
   REXKRNL_TRACE("XMPGetStatus({:08X})", state_ptr);
@@ -426,7 +452,7 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       if (!XThread::GetCurrentThread()->main_thread()) {
         // Atrain spawns a thread 82437FD0 to call this in a tight loop forever.
-        rex::thread::Sleep(std::chrono::milliseconds(10));
+        ThrottleTightPoll(std::chrono::milliseconds(10));
       }
 
       return X_E_SUCCESS;
