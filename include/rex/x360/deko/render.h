@@ -212,18 +212,22 @@ class RenderDk final : public DestinosNativos {
   // sampling; copia3d_pendiente_: a copy since then, which the next draw or clear waits for.
   // `modo`: kCopiaValor (times `escala`, the copy's 2^exp_bias) or kCopia7e3 (each colour channel's 7e3 bits as unorm,
   // then times `escala`).
-  static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1;
+  // kCopiaDesde7e3: the reverse, 7e3 bits held as unorm back to their float value.
+  static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1, kCopiaDesde7e3 = 2;
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
                 uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);
   bool rop_sin_barrera_ = true;
   bool copia3d_pendiente_ = false;
-  uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0;
+  uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0, contenidos_llevados_ = 0;
   DkShader fs_copia_color_{}, fs_copia_profundidad_{};
   bool fs_copia_color_valido_ = false, fs_copia_profundidad_valido_ = false;
   deko::Subida Reservar(uint32_t bytes, uint32_t alineacion);
 
   // ---- Render targets and resolved textures (nfsmw_dk_destinos.cpp)
-  ImagenDk* DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch);
+  // para_copia: the image holding the base's content, whichever family (see propietario_).
+  ImagenDk* DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia = false);
+  ImagenDk* ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch);
+  bool EsDestinoFlotante(uint32_t formato) const;
   ImagenDk* DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch);
   // The resolved texture at that address, if one exists and has content.
   const ImagenDk* TexturaResuelta(uint32_t direccion);
@@ -443,6 +447,11 @@ class RenderDk final : public DestinosNativos {
 
   // Render targets, resolved textures
   std::unordered_map<uint64_t, ImagenDk> destinos_;
+  // With deko_destinos_flotantes, a 32-bit EDRAM base has two images (8-bit and float): the key of the one holding its
+  // latest content, by (base << 20 | pitch). A draw in the other family carries the content over first (LlevarContenido),
+  // as the EDRAM's bits would be read in the new format; a copy reads the owner.
+  std::unordered_map<uint64_t, uint64_t> propietario_;
+  void LlevarContenido(ImagenDk& origen, ImagenDk& destino, uint32_t formato_destino);
   std::unordered_map<uint64_t, ImagenDk> profundidades_;
   std::unordered_map<uint32_t, Resuelta> resueltas_;
   uint64_t bandas_resueltas_ = 0;  // resolves of a predicated-tiling band into a texture's lower rows

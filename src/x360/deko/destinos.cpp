@@ -323,9 +323,27 @@ uint a7e3(float f) {
   uint b = u < 0x3E800000u ? subnormal : u - (124u << 23);
   return ((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16) & 0x3FFu;
 }
+// Xenia's Float7e3To32 (xenos.cpp): 7e3 bits back to their value.
+float de7e3(uint f) {
+  f &= 0x3FFu;
+  if (f == 0u) {
+    return 0.0;
+  }
+  uint m = f & 0x7Fu;
+  int e = int(f >> 7);
+  if (e == 0) {
+    int l = 7 - findMSB(m);
+    e = 1 - l;
+    m = (m << uint(l)) & 0x7Fu;
+  }
+  return uintBitsToFloat((uint(e + 124) << 23) | (m << 16));
+}
 void main() {
   vec4 v = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
-  if (copia.modo.x == 1) {
+  if (copia.modo.x == 2) {
+    uvec3 b = uvec3(round(clamp(v.rgb, 0.0, 1.0) * 1023.0));
+    v = vec4(de7e3(b.r), de7e3(b.g), de7e3(b.b), v.a);
+  } else if (copia.modo.x == 1) {
     v = vec4(float(a7e3(v.r)), float(a7e3(v.g)), float(a7e3(v.b)), 0.0) / 1023.0 +
         vec4(0.0, 0.0, 0.0, round(clamp(v.a, 0.0, 1.0) * 3.0) / 3.0);
   }
@@ -759,7 +777,8 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
   OlvidarEstado();
 }
 
-ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch) {
+// The image for a base in one format (one per base and family: 8-bit, float, and the 64-bit ones), created cleared.
+ImagenDk* RenderDk::ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch) {
   if (!pitch) {
     Rechazar(7, "destino de render con pitch 0");
     return nullptr;
@@ -767,11 +786,7 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   // EDRAM is memory: a game draws into a base with one format and resolves it with another (Halo 3 draws 8_8_8_8_GAMMA
   // and copies as 8_8_8_8 out of the same tiles). Every format here is RGBA8 on the host, so the key only tells the
   // 32-bit formats from the 64-bit ones (16_16_16_16 and its float, 5 and 7), whose tiles hold half the pixels.
-  static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
-  // With them on, the 2_10_10_10 family too (2, 3 = 7e3, 10, 12 = 7e3 as 16_16_16_16): one float image per base, so a
-  // 7e3 drawing keeps its [0, 32) range and its copies as 2_10_10_10 read the same image (Halo 3's tone-mapped frame).
-  const bool flotante =
-      con_flotantes && (DestinoFlotante(formato) || formato == 2 || formato == 3 || formato == 10 || formato == 12);
+  const bool flotante = EsDestinoFlotante(formato);
   const uint32_t clase = ((formato == 5 || formato == 7) ? 1u : 0u) | (flotante ? 2u : 0u);
   const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(clase) << 16) | pitch;
   if (auto it = destinos_.find(clave); it != destinos_.end()) {
@@ -793,6 +808,72 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
   ImagenDk& nueva = destinos_.emplace(clave, imagen).first->second;
   PrepararDestino(nueva);
   return &nueva;
+}
+
+// With deko_destinos_flotantes on, the 2_10_10_10 family (2, 3 = 7e3, 10, 12 = 7e3 as 16_16_16_16) is float as well:
+// a 7e3 drawing keeps its [0, 32) range (Halo 3's tone-mapped frame). Its 8-bit formats stay 8-bit.
+bool RenderDk::EsDestinoFlotante(uint32_t formato) const {
+  static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
+  return con_flotantes &&
+         (DestinoFlotante(formato) || formato == 2 || formato == 3 || formato == 10 || formato == 12);
+}
+
+// A base's colour target for a draw (para_copia false) or a copy (true). A 32-bit base used in both families has two
+// images (Halo 3's 0x4C0: 7e3 drawings, 2_10_10_10 and 8_8_8_8 ones, copies as 10, 0 and 12): a draw in the other
+// family first carries the content over (LlevarContenido) and takes the base; a copy reads whichever image holds it.
+ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch, bool para_copia) {
+  static const bool con_flotantes = REXCVAR_GET(deko_destinos_flotantes);
+  const bool de_64 = formato == 5 || formato == 7;
+  if (!con_flotantes || de_64 || !pitch) {
+    return ImagenColor(base, formato, pitch);
+  }
+  const uint64_t clave_base = (uint64_t(base) << 20) | pitch;
+  ImagenDk* propietaria = nullptr;
+  if (auto p = propietario_.find(clave_base); p != propietario_.end()) {
+    if (auto o = destinos_.find(p->second); o != destinos_.end() && o->second.viva) {
+      propietaria = &o->second;
+    }
+  }
+  if (para_copia && propietaria) {
+    return propietaria;
+  }
+  ImagenDk* imagen = ImagenColor(base, formato, pitch);
+  if (!imagen) {
+    return nullptr;
+  }
+  if (propietaria && propietaria != imagen && !para_copia) {
+    LlevarContenido(*propietaria, *imagen, formato);
+  }
+  if (!para_copia || !propietaria) {
+    const bool flotante = EsDestinoFlotante(formato);
+    propietario_[clave_base] = (uint64_t(base) << 20) | (uint64_t(flotante ? 2u : 0u) << 16) | pitch;
+  }
+  return imagen;
+}
+
+// A 32-bit base switching between its 8-bit and float images: the content goes across as the EDRAM's bits would read
+// in the new format (the H3Recomp PC port's CarryOver, as facts): a 7e3 drawing read as an 8-bit format is its 7e3
+// bits; 7e3 bits read as 7e3 are their value again; anything else is the value. The rows the game has used.
+void RenderDk::LlevarContenido(ImagenDk& origen, ImagenDk& destino, uint32_t formato_destino) {
+  const bool origen_flotante = origen.formato == DkImageFormat_RGBA16_Float;
+  const bool destino_flotante = destino.formato == DkImageFormat_RGBA16_Float;
+  const bool origen_7e3 = origen.formato_dibujo == 3 || origen.formato_dibujo == 12;
+  const bool destino_7e3 = formato_destino == 3 || formato_destino == 12;
+  int32_t modo = kCopiaValor;
+  if (origen_flotante && !destino_flotante && origen_7e3) {
+    modo = kCopia7e3;
+  } else if (!origen_flotante && destino_flotante && destino_7e3) {
+    modo = kCopiaDesde7e3;
+  }
+  HacerBorradoPendiente(origen);
+  const uint32_t alto = std::min(origen.alto, std::max(origen.alto_usado, destino.alto_usado) ? std::max(origen.alto_usado, destino.alto_usado) : origen.alto);
+  const uint32_t ancho = std::min(origen.ancho, destino.ancho);
+  if (Copiar3D(origen, 0, 0, ancho, alto, destino, 0, 0, modo, 1.0f)) {
+    destino.formato_dibujo = origen_7e3 && modo == kCopiaDesde7e3 ? uint8_t(formato_destino) : origen.formato_dibujo;
+    destino.alto_usado = std::max(destino.alto_usado, alto);
+    destino.borrado_pendiente = false;
+    ++contenidos_llevados_;
+  }
 }
 
 ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t pitch) {
@@ -1075,7 +1156,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
     return false;
   }
-  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch);
+  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch, true);
   if (!destino_render) {
     return false;
   }
@@ -1140,8 +1221,10 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       const bool bits_7e3 = (formato_color == 2 || formato_color == 10) &&
                             (destino_render->formato_dibujo == 3 || destino_render->formato_dibujo == 12) &&
                             destino_render->formato == DkImageFormat_RGBA16_Float;
-      const int32_t modo_copia = bits_7e3 ? kCopia7e3 : kCopiaValor;
-      const bool transforma = bits_7e3 || sesgo != 0;
+      const bool desde_7e3 = (formato_color == 3 || formato_color == 12) &&
+                             destino_render->formato == DkImageFormat_RGBA8_Unorm;
+      const int32_t modo_copia = bits_7e3 ? kCopia7e3 : desde_7e3 ? kCopiaDesde7e3 : kCopiaValor;
+      const bool transforma = bits_7e3 || desde_7e3 || sesgo != 0;
       static const bool frontal_perezoso = REXCVAR_GET(nfsmw_nativo_frontal_perezoso);
       const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
                            !transforma &&
@@ -2052,9 +2135,9 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
                      par.second.imagen.alto, (unsigned long long)par.second.imagen.version,
                      par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
       }
-      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu bandas=%llu causas:", ultimo_frontal_,
-                   (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
-                   (unsigned long long)bandas_resueltas_);
+      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu causas:",
+                   ultimo_frontal_, (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
+                   (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_);
       for (const auto& c : causas_) {
         std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
       }
