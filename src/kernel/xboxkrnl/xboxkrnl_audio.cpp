@@ -21,9 +21,11 @@
 #include <rex/types.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -241,8 +243,41 @@ u32 XAudioUnregisterRenderDriverClient_entry(mapped_void driver_ptr) {
   return X_ERROR_SUCCESS;
 }
 
+#if REX_PLATFORM_SWITCH
+REXCVAR_DEFINE_BOOL(switch_subir_hilo_audio, false, "Audio",
+                    "Switch: the guest thread that submits the game's audio frames goes one step above the other game "
+                    "threads (0x3A), found by what it does, not by a name the game may never give it");
+
+// Halo 3 delivered 40 of the 187 frames a second the output needs (72 % missing, audio_volcado): its audio thread
+// waits at 0x3B with every other guest thread while the three cores are full, and the sound comes out as 5 ms
+// bursts between gaps, heard as static. switch_hilos_audio_juego raises threads by name; Halo's have none.
+void SubirHiloQueEnviaAudio() {
+  static thread_local bool visto = false;
+  if (visto) {
+    return;
+  }
+  visto = true;
+  if (!REXCVAR_GET(switch_subir_hilo_audio)) {
+    return;
+  }
+  auto* hilo = rex::system::XThread::GetCurrentThread();
+  // A host thread (the SDK's Audio Worker runs at 0x2B, already above) is left alone: 0x3A would lower it.
+  if (!hilo || !hilo->thread() || !hilo->is_guest_thread()) {
+    std::fprintf(stderr, "[audio] las tramas llegan desde un hilo del SDK (%s), no del juego: no se sube ninguno\n",
+                 hilo ? hilo->name().c_str() : "?");
+    return;
+  }
+  hilo->thread()->set_priority(0x3A);
+  std::fprintf(stderr, "[audio] el hilo %u (%s) envia las tramas de audio: sube a la prioridad 0x3A\n",
+               hilo->thread_id(), hilo->name().c_str());
+}
+#endif
+
 u32 XAudioSubmitRenderDriverFrame_entry(mapped_void driver_ptr, mapped_void samples_ptr) {
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
+#if REX_PLATFORM_SWITCH
+  SubirHiloQueEnviaAudio();
+#endif
 
   static uint32_t submit_krnl_count = 0;
   if (submit_krnl_count < 10) {
