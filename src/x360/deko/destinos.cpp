@@ -2123,11 +2123,14 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   // real scene vs the empty/white one. First swaps only. No behavior change.
   {
     static int diag_pres = 0;
-    if (diag_pres < 48) {
+    // The first swaps, then one in 300 (in game the front buffer may not be the menu's).
+    if (diag_pres < 48 || (fotograma_ % 300) == 0) {
       ++diag_pres;
       std::fprintf(stderr,
-                   "[present] swap base=%08X want=%ux%u desde_destino=%d origen=%s %ux%u | resueltas=%zu:",
-                   base, ancho, alto, int(desde_destino),
+                   "[present] fotograma %llu swap base=%08X formato %u %ux%u want=%ux%u desde_destino=%d origen=%s %ux%u "
+                   "| resueltas=%zu:",
+                   (unsigned long long)fotograma_, base, swap.dword[1] & 0x3F, (swap.dword[2] & 0x1FFF) + 1,
+                   ((swap.dword[2] >> 13) & 0x1FFF) + 1, ancho, alto, int(desde_destino),
                    origen ? (desde_destino ? "frontal" : "resuelta") : "NINGUNA", ancho_origen, alto_origen,
                    resueltas_.size());
       for (const auto& par : resueltas_) {
