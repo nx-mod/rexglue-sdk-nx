@@ -2308,6 +2308,15 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
         if (claves[i]) {
           linea += fmt::format(" {}{}={:03X}/f{}", i < 4 ? "rt" : "z", i < 4 ? i : 0u,
                                uint32_t(claves[i] >> 24) & 0xFFF, uint32_t(claves[i] >> 16) & 0xF);
+          if (i < 4) {
+            // Its exponent bias (RB_COLOR_INFO bits 20-25, signed): the shaders scale their output by 2^this.
+            static constexpr uint32_t kInfoRt[4] = {gr::XE_GPU_REG_RB_COLOR_INFO, gr::XE_GPU_REG_RB_COLOR1_INFO,
+                                                    gr::XE_GPU_REG_RB_COLOR2_INFO, gr::XE_GPU_REG_RB_COLOR3_INFO};
+            const int32_t sesgo_rt = int32_t(r[kInfoRt[i]] << 6) >> 26;
+            if (sesgo_rt) {
+              linea += fmt::format("/sesgo{}", sesgo_rt);
+            }
+          }
         }
       }
       volcado_dibujos_.push_back(std::move(linea));
