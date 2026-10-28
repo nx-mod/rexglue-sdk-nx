@@ -1188,6 +1188,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   if (!cuenta) {
     return true;
   }
+  // Direct3D's fast clear: depth-only screen-space rectangles over a colour buffer (BorradoRapidoD3D).
+  if (modo_edram == 5 && tipo == 8 && (r[gr::XE_GPU_REG_PA_CL_VTE_CNTL] & 0x300) == 0x300 &&
+      BorradoRapidoD3D(r, cuenta)) {
+    return true;
+  }
   DkPrimitive primitiva;
   bool admite_reinicio = false;
   bool rectangulos = false;  // drawn as triangles that gs_rectangulos_ completes

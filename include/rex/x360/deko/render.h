@@ -224,6 +224,11 @@ class RenderDk final : public DestinosNativos {
   // own image here, so the last writer of every tile is kept (dueno_baldosa_): MarcarBaldosas when a target is drawn
   // on, TraerBaldosas before a target is drawn on or resolved, which copies in the tiles another target wrote since.
   void MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1);
+  // Direct3D's fast clear: the bulk of a colour buffer is cleared by depth-only rectangles drawn through a 4x MSAA
+  // depth view at the colour buffer's EDRAM base (the depth writes land in its memory); only the edges go through the
+  // colour path. Here each image has its own memory, so the colour part is done directly: true if it was one.
+  bool BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta);
+  uint64_t borrados_rapidos_ = 0;
   void TraerBaldosas(ImagenDk& imagen, uint32_t filas);
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
                 uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);

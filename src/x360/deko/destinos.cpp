@@ -707,6 +707,84 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   return true;
 }
 
+bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
+  const uint32_t base = r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF;
+  const uint32_t superficie = r[gr::XE_GPU_REG_RB_SURFACE_INFO];
+  const uint32_t msaa = (superficie >> 16) & 0x3;  // 0 = 1x, 1 = 2x, 2 = 4x
+  const uint32_t por_x = msaa == 2 ? 2 : 1, por_y = msaa == 0 ? 1 : 2;
+  const uint32_t pitch_color = (superficie & 0x3FFF) * por_x;
+  ImagenDk* imagenes[4] = {};
+  uint32_t n = 0;
+  for (auto& [clave, imagen] : destinos_) {
+    if (imagen.viva && imagen.edram_base == base && imagen.edram_pitch == pitch_color && n < 4) {
+      imagenes[n++] = &imagen;
+    }
+  }
+  if (!n) {
+    return false;  // no colour buffer there: a real depth clear
+  }
+  // The clear's vertices, through vertex fetch constant 0: x, y, z, then the colour (r, g, b, a), 7 floats each.
+  constexpr uint32_t kZancada = 7;
+  const uint32_t w0 = r[kRegFetch], w1 = r[kRegFetch + 1];
+  if ((w0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex) || cuenta < 3 ||
+      ((w1 >> 2) & 0xFFFFFF) < cuenta * kZancada) {
+    return false;
+  }
+  const uint8_t* datos = memoria_->TranslatePhysical(w0 & ~0x3u);
+  const auto orden = static_cast<xenos::Endian>(w1 & 0x3);
+  const auto valor = [&](uint32_t i) {
+    uint32_t crudo;
+    std::memcpy(&crudo, datos + size_t(i) * 4, 4);
+    crudo = xenos::GpuSwap(crudo, orden);
+    float f;
+    std::memcpy(&f, &crudo, 4);
+    return f;
+  };
+  const float color[4] = {valor(3), valor(4), valor(5), valor(6)};
+  for (const float c : color) {
+    if (!std::isfinite(c)) {
+      return false;
+    }
+  }
+  AsegurarTrabajo();
+  EmitirCieloPendiente();
+  AntesDe3D();
+  DkCmdBuf cmd = nucleo_.comandos();
+  MarcarGpu(kGpuBorrados);
+  for (uint32_t i = 0; i < n; ++i) {
+    ImagenDk& imagen = *imagenes[i];
+    HacerBorradoPendiente(imagen);
+    DkImageView vista;
+    dkImageViewDefaults(&vista, &imagen.imagen);
+    dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
+    for (uint32_t v = 0; v + 2 < cuenta; v += 3) {
+      // A rectangle's corners sit on pixel edges; the surface's pixels are por_x x por_y of the buffer's.
+      const float xs[3] = {valor(v * kZancada), valor((v + 1) * kZancada), valor((v + 2) * kZancada)};
+      const float ys[3] = {valor(v * kZancada + 1), valor((v + 1) * kZancada + 1), valor((v + 2) * kZancada + 1)};
+      const int32_t x0 = std::clamp(int32_t(std::floor(std::min({xs[0], xs[1], xs[2]}) + 0.5f)) * int32_t(por_x), 0,
+                                    int32_t(imagen.ancho));
+      const int32_t y0 = std::clamp(int32_t(std::floor(std::min({ys[0], ys[1], ys[2]}) + 0.5f)) * int32_t(por_y), 0,
+                                    int32_t(imagen.alto));
+      const int32_t x1 = std::clamp(int32_t(std::floor(std::max({xs[0], xs[1], xs[2]}) + 0.5f)) * int32_t(por_x), x0,
+                                    int32_t(imagen.ancho));
+      const int32_t y1 = std::clamp(int32_t(std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f)) * int32_t(por_y), y0,
+                                    int32_t(imagen.alto));
+      if (x1 <= x0 || y1 <= y0) {
+        continue;
+      }
+      const DkScissor tijera = {uint32_t(x0), uint32_t(y0), uint32_t(x1 - x0), uint32_t(y1 - y0)};
+      dkCmdBufSetScissors(cmd, 0, &tijera, 1);
+      dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
+      imagen.alto_usado = std::max(imagen.alto_usado, uint32_t(y1));
+    }
+    std::memcpy(imagen.borrado_color, color, sizeof(color));
+  }
+  ++borrados_rapidos_;
+  rop_sin_barrera_ = true;
+  OlvidarEstado();
+  return true;
+}
+
 void RenderDk::MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1) {
   static const bool con_baldosas = REXCVAR_GET(deko_edram_baldosas);
   if (!con_baldosas) {
@@ -2439,10 +2517,11 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
                      par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
       }
       std::fprintf(stderr,
-                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu baldosas=%llu causas:",
+                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu baldosas=%llu "
+                   "borrados_rapidos=%llu causas:",
                    ultimo_frontal_, (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
                    (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_,
-                   (unsigned long long)baldosas_traidas_);
+                   (unsigned long long)baldosas_traidas_, (unsigned long long)borrados_rapidos_);
       for (const auto& c : causas_) {
         std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
       }
