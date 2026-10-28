@@ -802,7 +802,13 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   g_.pase_alto = alto;
   ++serie_imagenes_;  // a new pass: the framing cache keys on it
   g_.pase_serie = serie_imagenes_;
-  pase_escala_ = ((claves[4] >> 20) & 0x3) == 2 ? 2.0f : 1.0f;  // a 4x MSAA depth view (Dibujar): 2x2 samples a pixel
+  // A 4x MSAA surface (Dibujar): 2x2 samples a pixel.
+  pase_escala_ = 1.0f;
+  for (uint32_t i = 0; i < 5; ++i) {
+    if (claves[i] && ((claves[i] >> 20) & 0x3) == 2) {
+      pase_escala_ = 2.0f;
+    }
+  }
   return true;
 }
 
@@ -1323,14 +1329,18 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     claves[4] = (uint64_t(1) << 62) | (uint64_t(info & 0xFFF) << 24) | (uint64_t((info >> 16) & 0x1) << 16) | pitch;
     hay_destino = true;
   }
-  // Direct3D clears a depth buffer through a 4x MSAA view: a surface half as wide (600 for Halo 3's 1200), each pixel
-  // 2x2 samples of the same EDRAM. A draw that writes only depth or stencil on a 4x surface goes to the 1x buffer at
-  // twice the pitch, its pass scaled by 2 (EmpezarPase), or it cleared a depth image of its own and the real one kept
-  // stale depth in all but the edge strip (a black box over Halo 3's scene). Colour on 4x surfaces is not done yet.
-  if (((r[gr::XE_GPU_REG_RB_SURFACE_INFO] >> 16) & 0x3) == 2 && claves[4] && !claves[0] && !claves[1] && !claves[2] &&
-      !claves[3]) {
+  // 4x MSAA surfaces live in sample space (as the H3Recomp PC port found): a 4x surface's pixel is 2x2 samples of the
+  // same EDRAM, so its targets are the images at twice the pitch, drawn with the pass scaled by 2 (EmpezarPase), and
+  // its resolves average the samples (Copiar). Direct3D clears a 1x depth buffer through a 4x view half as wide; drawn
+  // on an image of its own, the real one kept stale depth (a black box over Halo 3's scene). Halo 3's menu draws its
+  // G-buffer at 4x. 2x MSAA (samples one above the other) is not handled.
+  if (((r[gr::XE_GPU_REG_RB_SURFACE_INFO] >> 16) & 0x3) == 2) {
     pitch *= 2;
-    claves[4] = (claves[4] & ~uint64_t(0xFFFF)) | (uint64_t(2) << 20) | pitch;
+    for (uint64_t& clave : claves) {
+      if (clave) {
+        clave = (clave & ~uint64_t(0xFFFF)) | (uint64_t(2) << 20) | pitch;
+      }
+    }
   }
   if (!hay_destino || !pitch) {
     return true;  // writes nothing visible

@@ -1434,11 +1434,13 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
     return false;
   }
-  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch, true);
+  // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
+  const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+  ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
   if (!destino_render) {
     return false;
   }
-  TraerBaldosas(*destino_render, uint32_t(std::max(y1, 0)));  // what other targets wrote over its tiles since
+  TraerBaldosas(*destino_render, uint32_t(std::max(y1, 0)) * muestras);  // what other targets wrote over its tiles
   DkCmdBuf cmd = nucleo_.comandos();
   if (copiar) {
     const uint32_t info_destino = reg.rb_copy_dest_info;
@@ -1515,8 +1517,36 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
             std::max(destino_render->alto_usado, std::min(uint32_t(y1), destino_render->alto));
       }
       HacerBorradoPendiente(*destino_render);
-      CompletarBanda(*destino_render, uint32_t(std::max(y1, 0)), false, 0);
-      if (frontal && uint32_t(x0) < destino_render->ancho && ancho && alto) {
+      CompletarBanda(*destino_render, uint32_t(std::max(y1, 0)) * muestras, false, 0);
+      if (muestras > 1) {
+        // From a 4x MSAA surface: each pixel's 2x2 samples averaged by a linear blit at exactly half size.
+        const uint32_t fx0 = uint32_t(x0) * muestras, fy0 = uint32_t(y0) * muestras;
+        const uint32_t w = fx0 < destino_render->ancho
+                               ? std::min({uint32_t(x1 - x0), cabe_ancho, (destino_render->ancho - fx0) / muestras})
+                               : 0;
+        const uint32_t h = fy0 < destino_render->alto
+                               ? std::min({uint32_t(y1 - y0), cabe_alto, (destino_render->alto - fy0) / muestras})
+                               : 0;
+        if (w && h) {
+          destino_render->alto_usado = std::max(destino_render->alto_usado, fy0 + h * muestras);
+          MarcarGpu(kGpuCopias);
+          AntesDeTransferir();
+          const DkImageView origen_vista = VistaCompleta(destino_render->imagen);
+          const DkImageView destino_vista = VistaCompleta(resuelta->imagen.imagen);
+          const DkImageRect a = {fx0, fy0, 0, w * muestras, h * muestras, 1};
+          const DkImageRect b = {dx, dy, 0, w, h, 1};
+          dkCmdBufBlitImage(cmd, &origen_vista, &a, &destino_vista, &b, DkBlitFlag_FilterLinear, 0);
+          resuelta->escrita = true;
+          ++resuelta->imagen.version;
+          SombraMinimoResueltaEscrita(base_resuelta);
+          ++copias_;
+          LeerResuelta(reg, resuelta->imagen, x0, y0, dx, dy, w, h);
+          if (volcando_captura_) {
+            VolcarPaso(resuelta->imagen, base_resuelta);
+          }
+          OlvidarEstado();
+        }
+      } else if (frontal && uint32_t(x0) < destino_render->ancho && ancho && alto) {
         if (frontal_.pendiente && frontal_.base != base_resuelta) {
           MaterializarFrontal();
         }
