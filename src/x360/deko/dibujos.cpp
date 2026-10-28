@@ -631,10 +631,14 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
   // A negative YSCALE (the D3D norm) gives a positive height; a positive one, an inverted height.
   viewport[1] = centro_y + escala_y;
   viewport[3] = -2.0f * escala_y;
-  if (!((r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1)) {
+  // OpenGL clip space (dx_clip_space_def = 0): the translated vertex shaders take z from -w..w to 0..w (byte 492), so
+  // the range the guest's ZOFFSET and ZSCALE give from -1..1 is near = offset - scale, far = offset + scale (Xenia's
+  // GetHostViewportInfo). Without it Direct3D's depth clear wrote 0.5 for 0 and Halo 3's GREATER_EQUAL scene failed.
+  const bool z_opengl = !((r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1);
+  if (z_opengl) {
     Avisar(14, "espacio de recorte OpenGL (dx_clip_space_def = 0): Z ajustada por los shaders traducidos (byte 492)");
   }
-  viewport[4] = std::clamp(centro_z, 0.0f, 1.0f);
+  viewport[4] = std::clamp(z_opengl ? centro_z - escala_z : centro_z, 0.0f, 1.0f);
   viewport[5] = std::clamp(centro_z + escala_z, 0.0f, 1.0f);
   ndc[0] = 1.0f;
   ndc[1] = 1.0f;
