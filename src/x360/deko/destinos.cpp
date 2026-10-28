@@ -38,8 +38,8 @@ REXCVAR_DEFINE_BOOL(deko_edram_baldosas, false, "deko3d",
                     "it. Costly (many small copies a frame) and not shown to help Halo 3 yet")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
-                     "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of a level, the first ones drawing 1000 "
-                     "draws or more, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
+                     "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of each kind, menu (under 1000 draws) "
+                     "and game, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
@@ -914,13 +914,14 @@ void RenderDk::VolcarPaso(const ImagenDk& origen, uint32_t base) {
   if (!capturas || origen.profundidad || pasos_usados_ >= kPasosMaximo) {
     return;
   }
-  // The first capture frames of a level (the frame before drew 1000 draws or more; a menu draws a few hundred).
+  // The first capture frames of each kind: a menu's (the frame before drew under 1000 draws) and a level's.
   if (pasos_captura_ != volcando_captura_) {
-    if (pasos_capturas_ >= capturas || dibujos_ultimo_fotograma_ < 1000) {
+    int32_t& hechas = dibujos_ultimo_fotograma_ >= 1000 ? pasos_juego_ : pasos_menu_;
+    if (hechas >= capturas) {
       return;
     }
     pasos_captura_ = volcando_captura_;
-    ++pasos_capturas_;
+    ++hechas;
   }
   constexpr uint32_t kBytes = kPasoAncho * kPasoAlto * 4;
   if (!bloque_pasos_) {
