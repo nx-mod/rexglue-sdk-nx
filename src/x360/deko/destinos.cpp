@@ -33,6 +33,10 @@ REXCVAR_DEFINE_STRING(deko_ver_resueltas, "", "deko3d",
                       "Diagnostic: resolved texture addresses in hex, comma-separated (e.g. 044B0000,04780000); the "
                       "screen shows the front buffer and then each of them in turn, 4 s each")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
+                     "Diagnostic: the capture (nfsmw_captura_cada_s) whose frame, and the next one's, has every resolve "
+                     "written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
                     "off = everything RGBA8 as before")
@@ -472,6 +476,9 @@ void RenderDk::AsegurarTrabajo() {
   descriptores_libres_.insert(descriptores_libres_.end(), libres.begin(), libres.end());
   libres.clear();
   EscribirLecturas(uint32_t(trabajo_ % kRanuras));
+  if (!pasos_.empty()) {
+    EscribirPasos();
+  }
   lecturas_[trabajo_ % kRanuras].trabajo = trabajo_;
   LeerMarcasGpu(uint32_t(trabajo_ % kRanuras));
   dedupe_.NuevoFotograma(trabajo_);  // a new upload ring: the copies of the previous works are not here
@@ -745,6 +752,79 @@ void RenderDk::BorrarSolapes(const uint64_t claves[5], uint32_t pitch, uint32_t 
         borrados_solapados_ += filas;
       }
     }
+  }
+}
+
+namespace {
+constexpr uint32_t kPasoAncho = 288, kPasoAlto = 160, kPasosMaximo = 64;
+}
+
+void RenderDk::VolcarPaso(const ImagenDk& origen, uint32_t base) {
+  static const int32_t captura = REXCVAR_GET(deko_volcar_pasos);
+  if (!captura || volcando_captura_ < captura || volcando_captura_ > captura + 1 || origen.profundidad ||
+      pasos_usados_ >= kPasosMaximo) {
+    return;
+  }
+  constexpr uint32_t kBytes = kPasoAncho * kPasoAlto * 4;
+  if (!bloque_pasos_) {
+    bloque_pasos_ = nucleo_.CrearBloqueLectura(kPasosMaximo * kBytes, "volcado de pasos");
+    if (!bloque_pasos_) return;
+  }
+  PasoVolcado p;
+  if (!CrearImagen(p.imagen, DkImageType_2D, DkImageFormat_RGBA8_Unorm, kPasoAncho, kPasoAlto, 1, 1,
+                   DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine, "paso volcado")) {
+    return;
+  }
+  p.offset = pasos_usados_++ * kBytes;
+  p.base = base;
+  p.ancho = origen.ancho;
+  p.alto = origen.alto;
+  p.numero = pasos_numero_++;
+  p.captura = volcando_captura_;
+  DkCmdBuf cmd = nucleo_.comandos();
+  MarcarGpu(kGpuCopias);
+  BarreraTransferencia();  // the resolve's writes, on either engine
+  const DkImageView de = VistaCompleta(origen.imagen);
+  const DkImageView a = VistaCompleta(p.imagen.imagen);
+  const DkImageRect r_de = {0, 0, 0, origen.ancho, origen.alto, 1};
+  const DkImageRect r_a = {0, 0, 0, kPasoAncho, kPasoAlto, 1};
+  dkCmdBufBlitImage(cmd, &de, &r_de, &a, &r_a, DkBlitFlag_FilterLinear, 0);
+  BarreraTransferencia();
+  dkMemBlockFlushCpuCache(bloque_pasos_, p.offset, kBytes);
+  const DkCopyBuf buf = {dkMemBlockGetGpuAddr(bloque_pasos_) + p.offset, kPasoAncho * 4, kBytes};
+  dkCmdBufCopyImageToBuffer(cmd, &a, &r_a, &buf, 0);
+  transferencia_sin_barrera_ = true;
+  p.trabajo = trabajo_;
+  if (volcando_captura_) {
+    volcado_dibujos_.push_back(fmt::format("  p paso {} ({:08X} {}x{})", p.numero, base, p.ancho, p.alto));
+  }
+  pasos_.push_back(std::move(p));
+}
+
+void RenderDk::EscribirPasos() {
+  constexpr uint32_t kBytes = kPasoAncho * kPasoAlto * 4;
+  for (size_t i = 0; i < pasos_.size();) {
+    PasoVolcado& p = pasos_[i];
+    if ((nucleo_.TrabajoAbierto() && p.trabajo == trabajo_) || !nucleo_.TrabajoTerminado(p.trabajo)) {
+      ++i;
+      continue;
+    }
+    dkMemBlockFlushCpuCache(bloque_pasos_, p.offset, kBytes);
+    const uint8_t* rgba = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(bloque_pasos_)) + p.offset;
+    const std::filesystem::path ruta =
+        rex::filesystem::GetExecutableFolder() / "capturas" /
+        fmt::format("paso_c{}_{:02}_{:08X}_{}x{}.ppm", p.captura, p.numero, p.base, p.ancho, p.alto);
+    if (FILE* f = std::fopen(ruta.string().c_str(), "wb")) {
+      std::fprintf(f, "P6\n%u %u\n255\n", kPasoAncho, kPasoAlto);
+      std::vector<uint8_t> rgb(kPasoAncho * kPasoAlto * 3);
+      for (uint32_t t = 0; t < kPasoAncho * kPasoAlto; ++t) {
+        std::memcpy(&rgb[t * 3], rgba + t * 4, 3);
+      }
+      std::fwrite(rgb.data(), 1, rgb.size(), f);
+      std::fclose(f);
+    }
+    DestruirImagen(p.imagen);
+    pasos_.erase(pasos_.begin() + i);
   }
 }
 
@@ -1336,6 +1416,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
           LeerResuelta(reg, resuelta->imagen, x0, y0, dx, dy, cabe_ancho, cabe_alto);
         } else {
           LeerResuelta(reg, resuelta->imagen, x0, y0, dx, dy, ancho, alto);
+        }
+        if (volcando_captura_) {
+          VolcarPaso(resuelta->imagen, base_resuelta);
         }
         OlvidarEstado();
       }

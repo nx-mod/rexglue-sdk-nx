@@ -474,7 +474,19 @@ class RenderDk final : public DestinosNativos {
   DkGpuAddr lectura_gpu_ = 0;
   uint64_t lecturas_hechas_ = 0, lecturas_escritas_ = 0, lecturas_sin_sitio_ = 0;
   uint64_t siguiente_aviso_exposicion_ = 0;
-  uint64_t borrados_solapados_ = 0;  // rows of other targets cleared by BorrarSolapes, in total  // [exposicion] diagnostic: the frame of its next line
+  uint64_t borrados_solapados_ = 0;  // rows of other targets cleared by BorrarSolapes, in total
+  // deko_volcar_pasos: on two capture frames, every resolve shrunk to 288x160 and written as capturas/paso_*.ppm.
+  struct PasoVolcado {
+    ImagenDk imagen;
+    uint64_t trabajo = 0;
+    uint32_t offset = 0, base = 0, ancho = 0, alto = 0, numero = 0;
+    int32_t captura = 0;
+  };
+  std::vector<PasoVolcado> pasos_;
+  DkMemBlock bloque_pasos_ = nullptr;
+  uint32_t pasos_usados_ = 0, pasos_numero_ = 0;
+  void VolcarPaso(const ImagenDk& origen, uint32_t base);
+  void EscribirPasos();  // [exposicion] diagnostic: the frame of its next line
   // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are
   // not counted). Totals since start, as TiempoGpu gives them.
   std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp
