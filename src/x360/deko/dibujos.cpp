@@ -2348,6 +2348,15 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
           }
         }
       }
+      // A few pixel shader constants (material tint c98, texture transforms c99-c100, Direct3D's literals c254-c255),
+      // to read what an alpha test or a tint does to the draw.
+      if (ps) {
+        for (const uint32_t c : {98u, 99u, 100u, 254u, 255u}) {
+          float v[4];
+          std::memcpy(v, r + kRegConstantesPs + c * 4, sizeof(v));
+          linea += fmt::format(" c{}=({:.3g},{:.3g},{:.3g},{:.3g})", c, v[0], v[1], v[2], v[3]);
+        }
+      }
       // Where it draws: each color target's EDRAM base and format, and the depth one.
       for (uint32_t i = 0; i < 5; ++i) {
         if (claves[i]) {
