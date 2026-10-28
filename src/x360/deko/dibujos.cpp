@@ -40,6 +40,9 @@ extern "C" const char* RexSwitchLogDir(void);
 // and not distributed. Without them the setting keeps the game's shader, as in the Vulkan build.
 
 // The same settings as the Vulkan build's (nfsmw_nativo_dibujos.cpp): names, types and defaults.
+REXCVAR_DEFINE_BOOL(deko_sin_estencil, false, "deko3d",
+                    "Diagnostic: stencil tests off (Halo 3's stencil is written through a colour view, not carried over yet)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(nfsmw_nativo_inv_tamano_tex, true, "NFSMW",
                     "Renderizador nativo (18/09, build 164): los shaders toman 1/tamano de textura de las "
                     "constantes en vez de preguntarselo a la textura en cada muestreo con desplazamiento")
@@ -1996,7 +1999,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       ds.depthTestEnable = (d >> 1) & 0x1;
       ds.depthWriteEnable = ((d >> 1) & 0x1) && ((d >> 2) & 0x1);
       ds.depthCompareOp = DkCompareOp(((d >> 4) & 0x7) + 1);  // the Xenos functions in deko3d's order, from 1
-      ds.stencilTestEnable = d & 0x1;
+      // deko_sin_estencil (diagnostic): Halo 3 writes its stencil (a dither pattern) through a colour view of the depth
+      // buffer's EDRAM, which is not carried into the depth image yet; without it every stencil test fails.
+      static const bool sin_estencil = REXCVAR_GET(deko_sin_estencil);
+      ds.stencilTestEnable = (d & 0x1) && !sin_estencil;
       repetible = repetible && !ds.depthWriteEnable && !ds.stencilTestEnable;
       ds.stencilFrontFailOp = DkStencilOp(((d >> 11) & 0x7) + 1);
       ds.stencilFrontPassOp = DkStencilOp(((d >> 14) & 0x7) + 1);

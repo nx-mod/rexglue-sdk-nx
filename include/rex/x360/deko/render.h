@@ -503,6 +503,8 @@ class RenderDk final : public DestinosNativos {
   std::vector<PasoVolcado> pasos_;
   DkMemBlock bloque_pasos_ = nullptr;
   uint32_t pasos_usados_ = 0, pasos_numero_ = 0;
+  int32_t pasos_captura_ = 0, pasos_capturas_ = 0;  // the capture being dumped, and how many have been
+  uint64_t dibujados_al_swap_ = 0, dibujos_ultimo_fotograma_ = 0;
   void VolcarPaso(const ImagenDk& origen, uint32_t base);
   void EscribirPasos();  // [exposicion] diagnostic: the frame of its next line
   // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are

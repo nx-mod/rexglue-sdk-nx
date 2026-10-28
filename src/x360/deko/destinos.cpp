@@ -38,8 +38,8 @@ REXCVAR_DEFINE_BOOL(deko_edram_baldosas, false, "deko3d",
                     "it. Costly (many small copies a frame) and not shown to help Halo 3 yet")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
-                     "Diagnostic: the capture (nfsmw_captura_cada_s) whose frame, and the next one's, has every resolve "
-                     "written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
+                     "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of a level, the first ones drawing 1000 "
+                     "draws or more, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
@@ -891,10 +891,17 @@ constexpr uint32_t kPasoAncho = 288, kPasoAlto = 160, kPasosMaximo = 64;
 }
 
 void RenderDk::VolcarPaso(const ImagenDk& origen, uint32_t base) {
-  static const int32_t captura = REXCVAR_GET(deko_volcar_pasos);
-  if (!captura || volcando_captura_ < captura || volcando_captura_ > captura + 1 || origen.profundidad ||
-      pasos_usados_ >= kPasosMaximo) {
+  static const int32_t capturas = REXCVAR_GET(deko_volcar_pasos);
+  if (!capturas || origen.profundidad || pasos_usados_ >= kPasosMaximo) {
     return;
+  }
+  // The first capture frames of a level (the frame before drew 1000 draws or more; a menu draws a few hundred).
+  if (pasos_captura_ != volcando_captura_) {
+    if (pasos_capturas_ >= capturas || dibujos_ultimo_fotograma_ < 1000) {
+      return;
+    }
+    pasos_captura_ = volcando_captura_;
+    ++pasos_capturas_;
   }
   constexpr uint32_t kBytes = kPasoAncho * kPasoAlto * 4;
   if (!bloque_pasos_) {
@@ -2423,6 +2430,8 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
 }
 
 bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swap, uint32_t ancho, uint32_t alto) {
+  dibujos_ultimo_fotograma_ = dibujados_ - dibujados_al_swap_;
+  dibujados_al_swap_ = dibujados_;
   RexSwitchPerfCount(0);  // the profiler's "juego N fps"
   const uint64_t ahora = deko::AhoraNs();
   if (ultimo_swap_ns_) {
