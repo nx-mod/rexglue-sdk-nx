@@ -214,6 +214,9 @@ class RenderDk final : public DestinosNativos {
   // then times `escala`).
   // kCopiaDesde7e3: the reverse, 7e3 bits held as unorm back to their float value.
   static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1, kCopiaDesde7e3 = 2;
+  // After a full-surface clear draw: the rows of every other colour target whose EDRAM tiles that clear covered get
+  // the cleared value too, as the Xenos's one EDRAM would (Halo 3 clears 1200x1200 at 0x4C0, which wraps over 0x000).
+  void BorrarSolapes(const uint64_t claves[5], uint32_t pitch, uint32_t alto);
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
                 uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);
   bool rop_sin_barrera_ = true;
@@ -470,7 +473,8 @@ class RenderDk final : public DestinosNativos {
   uint8_t* lectura_cpu_ = nullptr;
   DkGpuAddr lectura_gpu_ = 0;
   uint64_t lecturas_hechas_ = 0, lecturas_escritas_ = 0, lecturas_sin_sitio_ = 0;
-  uint64_t siguiente_aviso_exposicion_ = 0;  // [exposicion] diagnostic: the frame of its next line
+  uint64_t siguiente_aviso_exposicion_ = 0;
+  uint64_t borrados_solapados_ = 0;  // rows of other targets cleared by BorrarSolapes, in total  // [exposicion] diagnostic: the frame of its next line
   // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are
   // not counted). Totals since start, as TiempoGpu gives them.
   std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp

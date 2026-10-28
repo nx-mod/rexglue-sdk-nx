@@ -2416,6 +2416,19 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
     ++dibujos_en_pase_;
   }
+  // Direct3D's Clear is a draw: the whole surface, written as is, no depth test. On the Xenos it writes EDRAM tiles,
+  // which other targets share: theirs are cleared too.
+  if (tipo >= 4 && (con_indices ? n_indices : cuenta) <= 4 && !(control_profundidad & 0x2) && viewport[0] == 0.0f &&
+      viewport[1] == 0.0f && std::abs(viewport[2]) >= float(g_.pase_ancho) &&
+      std::abs(viewport[3]) >= float(g_.pase_alto)) {
+    bool reemplaza = true;
+    for (uint32_t i = 0; i < 4; ++i) {
+      reemplaza &= !claves[i] || r[kMezcla[i]] == 0x00010001u;
+    }
+    if (reemplaza) {
+      BorrarSolapes(claves, pitch, g_.pase_alto);
+    }
+  }
   ++dibujados_;
   cortar_etapa(5);
   ns_grabando_ += deko::AhoraNs() - inicio_ns - (nucleo_.NsEsperandoValla() - espera_inicio_ns);

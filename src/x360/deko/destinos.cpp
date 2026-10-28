@@ -696,6 +696,58 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   return true;
 }
 
+void RenderDk::BorrarSolapes(const uint64_t claves[5], uint32_t pitch, uint32_t alto) {
+  constexpr uint32_t kBaldosas = 2048;  // 10 MB of 5120-byte tiles, 80x16 32-bit samples each
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (!claves[i]) {
+      continue;
+    }
+    const uint32_t base = uint32_t(claves[i] >> 24) & 0xFFF;
+    const uint32_t formato = uint32_t(claves[i] >> 16) & 0xF;
+    ImagenDk* const borrada = ImagenColor(base, formato, pitch);
+    if (!borrada) {
+      continue;
+    }
+    const bool de_64 = formato == 5 || formato == 7;
+    const uint32_t por_fila = ((pitch + 79) / 80) * (de_64 ? 2 : 1);
+    const uint32_t largo = std::min(kBaldosas, por_fila * ((std::min(alto, borrada->alto) + 15) / 16));
+    for (auto& [clave, otra] : destinos_) {
+      const uint32_t base_otra = uint32_t(clave >> 20) & 0xFFF;
+      // The same base's other family gets the content carried over when it is drawn (DestinoColor).
+      if (&otra == borrada || !otra.viva || base_otra == base) {
+        continue;
+      }
+      const uint32_t pitch_otra = uint32_t(clave & 0xFFFF);
+      const uint32_t por_fila_otra = ((pitch_otra + 79) / 80) * (((clave >> 16) & 0x1) ? 2 : 1);
+      // The first run of its 16-row tile rows with a tile inside the cleared range (modulo the EDRAM's size).
+      int32_t primera = -1, ultima = -1;
+      for (uint32_t k = 0; k * 16 < otra.alto; ++k) {
+        bool toca = false;
+        for (uint32_t j = 0; j < por_fila_otra && !toca; ++j) {
+          toca = (base_otra + k * por_fila_otra + j + kBaldosas - base) % kBaldosas < largo;
+        }
+        if (toca) {
+          if (primera < 0) primera = int32_t(k);
+          ultima = int32_t(k);
+        } else if (primera >= 0) {
+          break;
+        }
+      }
+      if (primera < 0) {
+        continue;
+      }
+      const uint32_t y0 = uint32_t(primera) * 16;
+      const uint32_t filas = std::min({otra.alto, uint32_t(ultima + 1) * 16, y0 + borrada->alto}) - y0;
+      HacerBorradoPendiente(otra);
+      rop_sin_barrera_ = true;  // the clear was just drawn into the source
+      if (Copiar3D(*borrada, 0, 0, std::min(borrada->ancho, otra.ancho), filas, otra, 0, y0, kCopiaValor, 1.0f)) {
+        otra.alto_usado = std::max(otra.alto_usado, y0 + filas);
+        borrados_solapados_ += filas;
+      }
+    }
+  }
+}
+
 deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
   AsegurarTrabajo();
   deko::Subida s = nucleo_.Reservar(bytes, alineacion);
@@ -2230,9 +2282,11 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
                      par.second.imagen.alto, (unsigned long long)par.second.imagen.version,
                      par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
       }
-      std::fprintf(stderr, " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu causas:",
+      std::fprintf(stderr,
+                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu solapes=%llu causas:",
                    ultimo_frontal_, (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
-                   (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_);
+                   (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_,
+                   (unsigned long long)borrados_solapados_);
       for (const auto& c : causas_) {
         std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
       }
