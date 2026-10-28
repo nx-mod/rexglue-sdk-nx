@@ -33,6 +33,10 @@ REXCVAR_DEFINE_STRING(deko_ver_resueltas, "", "deko3d",
                       "Diagnostic: resolved texture addresses in hex, comma-separated (e.g. 044B0000,04780000); the "
                       "screen shows the front buffer and then each of them in turn, 4 s each")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(deko_edram_baldosas, false, "deko3d",
+                    "Testing: EDRAM tile ownership (TraerBaldosas): a target copies in the tiles other targets wrote over "
+                    "it. Costly (many small copies a frame) and not shown to help Halo 3 yet")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
                      "Diagnostic: the capture (nfsmw_captura_cada_s) whose frame, and the next one's, has every resolve "
                      "written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
@@ -704,6 +708,10 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
 }
 
 void RenderDk::MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1) {
+  static const bool con_baldosas = REXCVAR_GET(deko_edram_baldosas);
+  if (!con_baldosas) {
+    return;
+  }
   constexpr uint32_t kBaldosas = 2048;  // 10 MB of 5120-byte tiles
   const uint32_t por_fila = ((imagen.edram_pitch + 79) / 80) * (imagen.edram_64 ? 2 : 1);
   const uint32_t hasta = std::min((y1 + 15) / 16, (imagen.alto + 15) / 16);
@@ -715,8 +723,9 @@ void RenderDk::MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1) 
 }
 
 void RenderDk::TraerBaldosas(ImagenDk& imagen, uint32_t filas) {
+  static const bool con_baldosas = REXCVAR_GET(deko_edram_baldosas);
   constexpr uint32_t kBaldosas = 2048;
-  if (!imagen.clave_edram) {
+  if (!con_baldosas || !imagen.clave_edram) {
     return;
   }
   const uint32_t ancho_baldosa = imagen.edram_64 ? 40 : 80;
@@ -2070,11 +2079,26 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
             std::fprintf(stderr, "[exposicion] f%llu %08X %ux%u: %g %g %g %g\n",
                          static_cast<unsigned long long>(fotograma_), p.base, p.ancho, p.alto, MedioAFlotante(h[0]),
                          MedioAFlotante(h[1]), MedioAFlotante(h[2]), MedioAFlotante(h[3]));
+            escribir_vista_exposicion_ = uint32_t(direccion);  // compared through the CPU's views once written
           }
           const uint32_t w[2] = {xenos::GpuSwap(uint32_t(h[0]) | (uint32_t(h[1]) << 16), orden),
                                  xenos::GpuSwap(uint32_t(h[2]) | (uint32_t(h[3]) << 16), orden)};
           std::memcpy(fisica + direccion, w, 8);
         }
+      }
+      // Diagnostic: the CPU reads physical memory through the 0xA/0xC/0xE views; if they do not alias the physical
+      // base the GPU writes, the game never sees what the GPU wrote (its exposure loop runs to an extreme).
+      if (escribir_vista_exposicion_) {
+        const uint32_t d = escribir_vista_exposicion_;
+        escribir_vista_exposicion_ = 0;
+        const uint8_t* vistas[4] = {memoria_->TranslatePhysical(d), memoria_->TranslateVirtual(0xA0000000u | d),
+                                    memoria_->TranslateVirtual(0xC0000000u | d),
+                                    memoria_->TranslateVirtual(0xE0000000u | d)};
+        uint64_t v[4];
+        for (int k = 0; k < 4; ++k) std::memcpy(&v[k], vistas[k], 8);
+        std::fprintf(stderr, "[vistas] %08X fisica %016llX A %016llX C %016llX E %016llX: %s\n", d,
+                     (unsigned long long)v[0], (unsigned long long)v[1], (unsigned long long)v[2],
+                     (unsigned long long)v[3], (v[0] == v[1] && v[0] == v[2] && v[0] == v[3]) ? "iguales" : "DISTINTAS");
       }
       ++lecturas_escritas_;
       continue;

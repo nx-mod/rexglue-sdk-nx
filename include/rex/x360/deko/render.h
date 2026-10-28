@@ -482,6 +482,7 @@ class RenderDk final : public DestinosNativos {
   DkGpuAddr lectura_gpu_ = 0;
   uint64_t lecturas_hechas_ = 0, lecturas_escritas_ = 0, lecturas_sin_sitio_ = 0;
   uint64_t siguiente_aviso_exposicion_ = 0;
+  uint32_t escribir_vista_exposicion_ = 0;  // [vistas] diagnostic: the address to compare through the CPU's views
   std::array<uint64_t, 2048> dueno_baldosa_{};  // clave_edram of each EDRAM tile's last writer (0: none)
   uint64_t pase_numero_ = 0;  // every EmpezarPase (g_.pase_serie restarts with OlvidarEstado)
   uint64_t marcado_serie_ = ~uint64_t(0);
