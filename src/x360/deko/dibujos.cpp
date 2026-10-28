@@ -712,6 +712,16 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   const DkImageView* colores[4] = {};
   uint32_t n = 0;
   for (uint32_t i = 0; i < 4; ++i) {
+    if (!imagenes[i]) {
+      // The targets are bound packed: a gap moves the later ones down a slot, away from the shader output that
+      // writes them. Not seen yet; reported if it happens.
+      for (uint32_t k = i + 1; k < 4; ++k) {
+        if (imagenes[k]) {
+          Avisar(42, "destinos de color con un hueco: los siguientes se ligan un hueco antes");
+          break;
+        }
+      }
+    }
     if (imagenes[i]) {
       dkImageViewDefaults(&vistas[n], &imagenes[i]->imagen);
       // k_8_8_8_8_GAMMA: the Xenos writes it gamma-encoded, and a resolve as 8_8_8_8 copies those bytes on (Halo 3's
