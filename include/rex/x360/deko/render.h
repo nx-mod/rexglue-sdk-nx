@@ -83,6 +83,11 @@ struct ImagenDk {
   //    pass valid; or before the target is copied or swapped.
   bool contenido_invalido = false;
   uint32_t resuelta_base = 0;
+  // Colour targets: where they live in the Xenos's EDRAM (tiles of 80x16 32-bit samples, a 64-bit target's 40x16
+  // pixels) and their key in destinos_, for the tile ownership (TraerBaldosas).
+  uint32_t edram_base = 0, edram_pitch = 0;
+  bool edram_64 = false;
+  uint64_t clave_edram = 0;
   // The ColorRenderTargetFormat this target was last drawn in (0xFF: never): a copy reading a 7e3 drawing as
   // 2_10_10_10 hands on its 7e3 bits (Copiar).
   uint8_t formato_dibujo = 0xFF;
@@ -214,9 +219,12 @@ class RenderDk final : public DestinosNativos {
   // then times `escala`).
   // kCopiaDesde7e3: the reverse, 7e3 bits held as unorm back to their float value.
   static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1, kCopiaDesde7e3 = 2;
-  // After a full-surface clear draw: the rows of every other colour target whose EDRAM tiles that clear covered get
-  // the cleared value too, as the Xenos's one EDRAM would (Halo 3 clears 1200x1200 at 0x4C0, which wraps over 0x000).
-  void BorrarSolapes(const uint64_t claves[5], uint32_t pitch, uint32_t alto);
+  // The Xenos has one EDRAM, and a game draws targets of different bases and pitches over the same tiles (Halo 3:
+  // 1200-wide frames, 400-, 640- and 1160-wide passes, 1200x1200 clears that wrap past the end). Each base has its
+  // own image here, so the last writer of every tile is kept (dueno_baldosa_): MarcarBaldosas when a target is drawn
+  // on, TraerBaldosas before a target is drawn on or resolved, which copies in the tiles another target wrote since.
+  void MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1);
+  void TraerBaldosas(ImagenDk& imagen, uint32_t filas);
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
                 uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);
   bool rop_sin_barrera_ = true;
@@ -474,7 +482,11 @@ class RenderDk final : public DestinosNativos {
   DkGpuAddr lectura_gpu_ = 0;
   uint64_t lecturas_hechas_ = 0, lecturas_escritas_ = 0, lecturas_sin_sitio_ = 0;
   uint64_t siguiente_aviso_exposicion_ = 0;
-  uint64_t borrados_solapados_ = 0;  // rows of other targets cleared by BorrarSolapes, in total
+  std::array<uint64_t, 2048> dueno_baldosa_{};  // clave_edram of each EDRAM tile's last writer (0: none)
+  uint64_t pase_numero_ = 0;  // every EmpezarPase (g_.pase_serie restarts with OlvidarEstado)
+  uint64_t marcado_serie_ = ~uint64_t(0);
+  uint32_t marcado_desde_ = 0, marcado_hasta_ = 0;
+  uint64_t baldosas_traidas_ = 0;  // tile rows copied in by TraerBaldosas, in total
   // deko_volcar_pasos: on two capture frames, every resolve shrunk to 288x160 and written as capturas/paso_*.ppm.
   struct PasoVolcado {
     ImagenDk imagen;

@@ -703,8 +703,12 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
     if (imagen) {
       AntesDeCambiarDestino(imagen);  // the front buffer still painted from it gets its copy first
       RestaurarContenido(*imagen, false);
+      if (!imagen->profundidad) {
+        TraerBaldosas(*imagen, imagen->alto);  // the tiles other targets wrote over since it was last drawn on
+      }
     }
   }
+  ++pase_numero_;
   AntesDe3D();
   // Creating a target records its first clear and forgets the emitted state: the binding comes after.
   uint32_t ancho = UINT32_MAX, alto = UINT32_MAX;
@@ -1745,6 +1749,26 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       CompletarBanda(*imagenes_pase_[4], hasta, true, 0);
     }
   }
+  // The EDRAM tiles this draw writes are its targets' now (TraerBaldosas): marked again only when the pass or the
+  // rows its scissor covers grow.
+  {
+    const uint32_t desde = tijera.y, hasta = tijera.y + tijera.height;
+    if (marcado_serie_ != pase_numero_ || desde < marcado_desde_ || hasta > marcado_hasta_) {
+      if (marcado_serie_ != pase_numero_) {
+        marcado_desde_ = desde;
+        marcado_hasta_ = hasta;
+      } else {
+        marcado_desde_ = std::min(marcado_desde_, desde);
+        marcado_hasta_ = std::max(marcado_hasta_, hasta);
+      }
+      marcado_serie_ = pase_numero_;
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (const ImagenDk* imagen = imagenes_pase_[i]) {
+          MarcarBaldosas(*imagen, marcado_desde_, marcado_hasta_);
+        }
+      }
+    }
+  }
 
   // --- Specialization and shared constants
   uint32_t especializacion = entrada->especializacion;
@@ -2415,19 +2439,6 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       REXLOG_INFO("[deko3d] perfil GPU: constantes del PS n{} en su primera prueba de variantes:{}", ps->numero, c);
     }
     ++dibujos_en_pase_;
-  }
-  // Direct3D's Clear is a draw: the whole surface, written as is, no depth test. On the Xenos it writes EDRAM tiles,
-  // which other targets share: theirs are cleared too.
-  if (tipo >= 4 && (con_indices ? n_indices : cuenta) <= 4 && !(control_profundidad & 0x2) && viewport[0] == 0.0f &&
-      viewport[1] == 0.0f && std::abs(viewport[2]) >= float(g_.pase_ancho) &&
-      std::abs(viewport[3]) >= float(g_.pase_alto)) {
-    bool reemplaza = true;
-    for (uint32_t i = 0; i < 4; ++i) {
-      reemplaza &= !claves[i] || r[kMezcla[i]] == 0x00010001u;
-    }
-    if (reemplaza) {
-      BorrarSolapes(claves, pitch, g_.pase_alto);
-    }
   }
   ++dibujados_;
   cortar_etapa(5);

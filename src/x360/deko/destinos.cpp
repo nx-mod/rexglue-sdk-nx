@@ -703,55 +703,99 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   return true;
 }
 
-void RenderDk::BorrarSolapes(const uint64_t claves[5], uint32_t pitch, uint32_t alto) {
-  constexpr uint32_t kBaldosas = 2048;  // 10 MB of 5120-byte tiles, 80x16 32-bit samples each
-  for (uint32_t i = 0; i < 4; ++i) {
-    if (!claves[i]) {
-      continue;
+void RenderDk::MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1) {
+  constexpr uint32_t kBaldosas = 2048;  // 10 MB of 5120-byte tiles
+  const uint32_t por_fila = ((imagen.edram_pitch + 79) / 80) * (imagen.edram_64 ? 2 : 1);
+  const uint32_t hasta = std::min((y1 + 15) / 16, (imagen.alto + 15) / 16);
+  for (uint32_t k = y0 / 16; k < hasta; ++k) {
+    for (uint32_t j = 0; j < por_fila; ++j) {
+      dueno_baldosa_[(imagen.edram_base + k * por_fila + j) % kBaldosas] = imagen.clave_edram;
     }
-    const uint32_t base = uint32_t(claves[i] >> 24) & 0xFFF;
-    const uint32_t formato = uint32_t(claves[i] >> 16) & 0xF;
-    ImagenDk* const borrada = ImagenColor(base, formato, pitch);
-    if (!borrada) {
-      continue;
+  }
+}
+
+void RenderDk::TraerBaldosas(ImagenDk& imagen, uint32_t filas) {
+  constexpr uint32_t kBaldosas = 2048;
+  if (!imagen.clave_edram) {
+    return;
+  }
+  const uint32_t ancho_baldosa = imagen.edram_64 ? 40 : 80;
+  const uint32_t por_fila = ((imagen.edram_pitch + 79) / 80) * (imagen.edram_64 ? 2 : 1);
+  const uint32_t filas_baldosas = std::min((filas + 15) / 16, (imagen.alto + 15) / 16);
+  // A run: consecutive tiles of one tile row that come from consecutive tiles of one row of the same other target.
+  ImagenDk* origen = nullptr;
+  uint32_t desde_j = 0, origen_j = 0, origen_k = 0, cuantas = 0, fila = 0;
+  bool traidas = false;
+  const auto copiar = [&]() {
+    if (!origen || !cuantas) {
+      return;
     }
-    const bool de_64 = formato == 5 || formato == 7;
-    const uint32_t por_fila = ((pitch + 79) / 80) * (de_64 ? 2 : 1);
-    const uint32_t largo = std::min(kBaldosas, por_fila * ((std::min(alto, borrada->alto) + 15) / 16));
-    for (auto& [clave, otra] : destinos_) {
-      const uint32_t base_otra = uint32_t(clave >> 20) & 0xFFF;
-      // The same base's other family gets the content carried over when it is drawn (DestinoColor).
-      if (&otra == borrada || !otra.viva || base_otra == base) {
+    const uint32_t xo = origen_j * ancho_baldosa, yo = origen_k * 16;
+    const uint32_t xd = desde_j * ancho_baldosa, yd = fila * 16;
+    if (xo < origen->ancho && yo < origen->alto && xd < imagen.ancho && yd < imagen.alto) {
+      const uint32_t w = std::min({cuantas * ancho_baldosa, origen->ancho - xo, imagen.ancho - xd});
+      const uint32_t h = std::min({16u, origen->alto - yo, imagen.alto - yd});
+      const bool origen_flotante = origen->formato == DkImageFormat_RGBA16_Float;
+      const bool destino_flotante = imagen.formato == DkImageFormat_RGBA16_Float;
+      int32_t modo = kCopiaValor;
+      if (origen_flotante && !destino_flotante && (origen->formato_dibujo == 3 || origen->formato_dibujo == 12)) {
+        modo = kCopia7e3;
+      } else if (!origen_flotante && destino_flotante &&
+                 (imagen.formato_dibujo == 3 || imagen.formato_dibujo == 12)) {
+        modo = kCopiaDesde7e3;
+      }
+      HacerBorradoPendiente(*origen);
+      if (Copiar3D(*origen, xo, yo, w, h, imagen, xd, yd, modo, 1.0f)) {
+        imagen.alto_usado = std::max(imagen.alto_usado, yd + h);
+        ++baldosas_traidas_;
+        traidas = true;
+      }
+    }
+    for (uint32_t j = desde_j; j < desde_j + cuantas; ++j) {
+      dueno_baldosa_[(imagen.edram_base + fila * por_fila + j) % kBaldosas] = imagen.clave_edram;
+    }
+    origen = nullptr;
+    cuantas = 0;
+  };
+  for (fila = 0; fila < filas_baldosas; ++fila) {
+    for (uint32_t j = 0; j < por_fila; ++j) {
+      const uint32_t baldosa = (imagen.edram_base + fila * por_fila + j) % kBaldosas;
+      const uint64_t dueno = dueno_baldosa_[baldosa];
+      ImagenDk* otra = nullptr;
+      uint32_t oj = 0, ok = 0;
+      if (dueno && dueno != imagen.clave_edram) {
+        auto it = destinos_.find(dueno);
+        // The same base and pitch in the other family carries its content over itself (DestinoColor); a 64-bit
+        // target's tiles hold other pixels than a 32-bit one's, which a copy of values cannot rearrange.
+        if (it != destinos_.end() && it->second.viva && it->second.edram_64 == imagen.edram_64 &&
+            !(it->second.edram_base == imagen.edram_base && it->second.edram_pitch == imagen.edram_pitch)) {
+          const ImagenDk& o = it->second;
+          const uint32_t por_fila_otra = ((o.edram_pitch + 79) / 80) * (o.edram_64 ? 2 : 1);
+          const uint32_t d = (baldosa + kBaldosas - o.edram_base) % kBaldosas;
+          if (d < por_fila_otra * ((o.alto + 15) / 16)) {
+            otra = &it->second;
+            oj = d % por_fila_otra;
+            ok = d / por_fila_otra;
+          }
+        }
+      }
+      if (otra && otra == origen && ok == origen_k && oj == origen_j + cuantas && j == desde_j + cuantas) {
+        ++cuantas;
         continue;
       }
-      const uint32_t pitch_otra = uint32_t(clave & 0xFFFF);
-      const uint32_t por_fila_otra = ((pitch_otra + 79) / 80) * (((clave >> 16) & 0x1) ? 2 : 1);
-      // The first run of its 16-row tile rows with a tile inside the cleared range (modulo the EDRAM's size).
-      int32_t primera = -1, ultima = -1;
-      for (uint32_t k = 0; k * 16 < otra.alto; ++k) {
-        bool toca = false;
-        for (uint32_t j = 0; j < por_fila_otra && !toca; ++j) {
-          toca = (base_otra + k * por_fila_otra + j + kBaldosas - base) % kBaldosas < largo;
-        }
-        if (toca) {
-          if (primera < 0) primera = int32_t(k);
-          ultima = int32_t(k);
-        } else if (primera >= 0) {
-          break;
-        }
-      }
-      if (primera < 0) {
-        continue;
-      }
-      const uint32_t y0 = uint32_t(primera) * 16;
-      const uint32_t filas = std::min({otra.alto, uint32_t(ultima + 1) * 16, y0 + borrada->alto}) - y0;
-      HacerBorradoPendiente(otra);
-      rop_sin_barrera_ = true;  // the clear was just drawn into the source
-      if (Copiar3D(*borrada, 0, 0, std::min(borrada->ancho, otra.ancho), filas, otra, 0, y0, kCopiaValor, 1.0f)) {
-        otra.alto_usado = std::max(otra.alto_usado, y0 + filas);
-        borrados_solapados_ += filas;
+      copiar();
+      if (otra) {
+        origen = otra;
+        desde_j = j;
+        origen_j = oj;
+        origen_k = ok;
+        cuantas = 1;
       }
     }
+    copiar();
+  }
+  if (traidas) {
+    OlvidarEstado();
   }
 }
 
@@ -941,6 +985,10 @@ ImagenDk* RenderDk::ImagenColor(uint32_t base, uint32_t formato, uint32_t pitch)
     return nullptr;
   }
   REXLOG_INFO("[deko3d] destino de render base {:03X}, formato {}, {}x{}", base, formato, pitch, alto);
+  imagen.edram_base = base;
+  imagen.edram_pitch = pitch;
+  imagen.edram_64 = (clase & 1u) != 0;
+  imagen.clave_edram = clave;
   ImagenDk& nueva = destinos_.emplace(clave, imagen).first->second;
   PrepararDestino(nueva);
   return &nueva;
@@ -1296,6 +1344,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   if (!destino_render) {
     return false;
   }
+  TraerBaldosas(*destino_render, uint32_t(std::max(y1, 0)));  // what other targets wrote over its tiles since
   DkCmdBuf cmd = nucleo_.comandos();
   if (copiar) {
     const uint32_t info_destino = reg.rb_copy_dest_info;
@@ -2366,10 +2415,10 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
                      par.second.escrita ? 'W' : '.', (origen == &par.second.imagen) ? "<=" : "");
       }
       std::fprintf(stderr,
-                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu solapes=%llu causas:",
+                   " ultimo_frontal=%08X rechazados=%llu copias3d=%llu llevados=%llu bandas=%llu baldosas=%llu causas:",
                    ultimo_frontal_, (unsigned long long)rechazados_, (unsigned long long)copias_3d_,
                    (unsigned long long)contenidos_llevados_, (unsigned long long)bandas_resueltas_,
-                   (unsigned long long)borrados_solapados_);
+                   (unsigned long long)baldosas_traidas_);
       for (const auto& c : causas_) {
         std::fprintf(stderr, " c%u=%llu", c.first, (unsigned long long)c.second);
       }
