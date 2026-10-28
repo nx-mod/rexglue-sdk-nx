@@ -29,6 +29,10 @@
 REXCVAR_DEFINE_BOOL(deko_bandas_profundidad, false, "deko3d",
                     "Testing: depth resolves of predicated-tiling bands into one texture, as the color ones")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(deko_ver_resueltas, "", "deko3d",
+                      "Diagnostic: resolved texture addresses in hex, comma-separated (e.g. 044B0000,04780000); the "
+                      "screen shows the front buffer and then each of them in turn, 4 s each")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
                     "off = everything RGBA8 as before")
@@ -2160,7 +2164,7 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   const uint32_t base = (swap.dword[1] & 0xFFFFF000) & 0x1FFFFFFF;
   ultimo_frontal_ = base;  // nfsmw_nativo_frontal_perezoso: the next resolve here may go to the Swap directly
   // The front buffer is still in its render target (and the texture was not written): painted from there.
-  const bool desde_destino = frontal_.pendiente && frontal_.base == base;
+  bool desde_destino = frontal_.pendiente && frontal_.base == base;
   const ImagenDk* origen = desde_destino ? frontal_.destino : TexturaResuelta(base);
   if (!origen && !desde_destino) {
     // Fallback: the Swap's frontbuffer address matched no resolved texture. Some titles (e.g. Halo 3) present
@@ -2172,6 +2176,35 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
       if (par.second.escrita && par.second.imagen.version >= mejor_version) {
         mejor_version = par.second.imagen.version;
         origen = &par.second.imagen;
+      }
+    }
+  }
+  // deko_ver_resueltas: in turn every 4 s, the front buffer and each listed resolved texture (one step of the frame).
+  {
+    static const std::vector<uint32_t> lista = [] {
+      std::vector<uint32_t> v;
+      const std::string texto = REXCVAR_GET(deko_ver_resueltas);
+      for (size_t i = 0; i < texto.size();) {
+        size_t fin = texto.find(',', i);
+        if (fin == std::string::npos) fin = texto.size();
+        if (fin > i) v.push_back(uint32_t(std::strtoul(texto.substr(i, fin - i).c_str(), nullptr, 16)) & 0x1FFFFFFF);
+        i = fin + 1;
+      }
+      return v;
+    }();
+    if (!lista.empty()) {
+      static uint64_t paso_anterior = ~0ull;
+      const uint64_t paso = (ahora / 4000000000ull) % (lista.size() + 1);
+      const ImagenDk* vista = paso ? TexturaResuelta(lista[paso - 1]) : nullptr;
+      if (paso != paso_anterior) {
+        paso_anterior = paso;
+        std::fprintf(stderr, "[ver] fotograma %llu: %s %08X%s\n", (unsigned long long)fotograma_,
+                     paso ? "resuelta" : "frontal", paso ? lista[paso - 1] : base,
+                     paso && !vista ? " (no escrita: se ve el frontal)" : "");
+      }
+      if (vista) {
+        origen = vista;
+        desde_destino = false;
       }
     }
   }
