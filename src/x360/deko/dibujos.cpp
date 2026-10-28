@@ -1903,6 +1903,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // or from 0 without indices), so a shader that reads whole buffers by vertex index (Halo 3's translator, r0.x) adds
   // it back to gl_VertexID.
   compartidas[122] = vmin;
+  // Byte 640: host pixels per guest pixel along each axis (2 on a 4x MSAA target, drawn in sample space): the
+  // translated pixel shaders' screen position (param_gen) is the guest pixel's.
+  std::memcpy(&compartidas[160], &pase_escala_, sizeof(pase_escala_));
   // Byte 492: the translated vertex shaders remap z from -w..w to 0..w when it is 1.0. Kept at 0: the depth is ZOFFSET +
   // ZSCALE * z in either clip space (CalcularEncuadre).
   const float z_opengl = 0.0f;

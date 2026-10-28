@@ -365,10 +365,13 @@ void main() {
 constexpr const char* kFsCopiaProfundidad = R"(#version 460
 layout(binding = 0) uniform sampler2D origen;
 layout(std140, binding = 0) uniform Copia {
-  ivec4 desplazamiento;
+  ivec4 desplazamiento;  // xy: source minus destination, in pixels; z: samples per pixel along each axis (0 or 1: none)
 } copia;
 void main() {
-  gl_FragDepth = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0).r;
+  // A 4x MSAA source is in sample space: a pixel's depth is its sample 0, the top-left of its 2x2 (as the console
+  // resolves Halo 3's menu G-buffer depth; averaging would make in-between depths along every silhouette).
+  ivec2 fuente = ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy;
+  gl_FragDepth = texelFetch(origen, fuente * max(copia.desplazamiento.z, 1), 0).r;
 }
 )";
 
@@ -643,7 +646,7 @@ void RenderDk::AntesDe3D() {
 }
 
 bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
-                        ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala) {
+                        ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras) {
   const bool z = destino.profundidad;
   if (!vs_salida_valido_ || !(z ? fs_copia_profundidad_valido_ : fs_copia_color_valido_)) {
     return false;
@@ -654,7 +657,7 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   if (!ubo) {
     return false;
   }
-  const int32_t desplazamiento[4] = {int32_t(x0) - int32_t(dx), int32_t(y0) - int32_t(dy), 0, 0};
+  const int32_t desplazamiento[4] = {int32_t(x0) - int32_t(dx), int32_t(y0) - int32_t(dy), int32_t(muestras), 0};
   const int32_t modos[4] = {modo, 0, 0, 0};
   const float escalas[4] = {escala, 0.0f, 0.0f, 0.0f};
   std::memcpy(ubo.cpu, desplazamiento, sizeof(desplazamiento));
@@ -1716,7 +1719,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
 
 void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
   const uint32_t info = reg.rb_depth_info;
-  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch);
+  const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;  // 4x: the sample-space image
+  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch * muestras);
   if (!profundidad) {
     return;
   }
@@ -1896,7 +1900,9 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
   }
   const uint32_t info = reg.rb_depth_info;
   ++copias_profundidad_;
-  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch);
+  // A 4x MSAA depth buffer is the image at twice the pitch (sample space, Dibujar); the rectangle is in pixels.
+  const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
+  ImagenDk* profundidad = DestinoProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch * muestras);
   if (!profundidad) {
     return;
   }
@@ -1924,10 +1930,14 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
   if (!resuelta) {
     return;
   }
-  const uint32_t ancho = std::min({uint32_t(x1 - x0), profundidad->ancho - uint32_t(x0), resuelta->imagen.ancho - dx});
-  const uint32_t alto = std::min({uint32_t(y1 - y0), profundidad->alto - uint32_t(y0), resuelta->imagen.alto - dy});
-  if (!ancho || !alto || uint32_t(x0) >= profundidad->ancho || uint32_t(y0) >= profundidad->alto ||
-      dx >= resuelta->imagen.ancho || dy >= resuelta->imagen.alto) {
+  const uint32_t ancho_px = profundidad->ancho / muestras, alto_px = profundidad->alto / muestras;
+  if (uint32_t(x0) >= ancho_px || uint32_t(y0) >= alto_px || dx >= resuelta->imagen.ancho ||
+      dy >= resuelta->imagen.alto) {
+    return;
+  }
+  const uint32_t ancho = std::min({uint32_t(x1 - x0), ancho_px - uint32_t(x0), resuelta->imagen.ancho - dx});
+  const uint32_t alto = std::min({uint32_t(y1 - y0), alto_px - uint32_t(y0), resuelta->imagen.alto - dy});
+  if (!ancho || !alto) {
     return;
   }
   AsegurarTrabajo();
@@ -1936,12 +1946,13 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
   // useful area grows to what is read.
   RestaurarContenido(*profundidad, true);
   if (y1 > 0) {
-    profundidad->alto_usado = std::max(profundidad->alto_usado, std::min(uint32_t(y1), profundidad->alto));
+    profundidad->alto_usado =
+        std::max(profundidad->alto_usado, std::min(uint32_t(y1) * muestras, profundidad->alto));
   }
   HacerBorradoPendiente(*profundidad);
-  CompletarBanda(*profundidad, uint32_t(std::max(y1, 0)), false, 0);
+  CompletarBanda(*profundidad, uint32_t(std::max(y1, 0)) * muestras, false, 0);
   static const bool sin_copia = REXCVAR_GET(nfsmw_nativo_resolver_sin_copia);
-  const bool entero = x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == profundidad->ancho &&
+  const bool entero = muestras == 1 && x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == profundidad->ancho &&
                       alto == profundidad->alto && resuelta->imagen.ancho == profundidad->ancho &&
                       resuelta->imagen.alto == profundidad->alto && resuelta->imagen.formato == profundidad->formato;
   if (sin_copia && entero && (borrara || REXCVAR_GET(nfsmw_nativo_intercambiar_sin_borrado))) {
@@ -1956,7 +1967,11 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
   }
   SombraMinimoCopiaDesde(*profundidad);
   // On the 3D engine (gl_FragDepth): compressed depth must not go through the copy engine.
-  if (!Copiar3D(*profundidad, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy)) {
+  if (!Copiar3D(*profundidad, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy, kCopiaValor, 1.0f,
+                muestras)) {
+    if (muestras > 1) {
+      return;  // the copy engine moves texels one to one
+    }
     MarcarGpu(kGpuCopias);
     AntesDeTransferir();
     const DkImageView origen_vista = VistaCompleta(profundidad->imagen);

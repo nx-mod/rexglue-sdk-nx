@@ -230,8 +230,10 @@ class RenderDk final : public DestinosNativos {
   bool BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta);
   uint64_t borrados_rapidos_ = 0;
   void TraerBaldosas(ImagenDk& imagen, uint32_t filas);
+  // `muestras` (depth only): samples per pixel along each axis of a 4x MSAA source in sample space; x0/y0 stay in
+  // pixels and each pixel takes its sample 0.
   bool Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto, ImagenDk& destino,
-                uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f);
+                uint32_t dx, uint32_t dy, int32_t modo = kCopiaValor, float escala = 1.0f, uint32_t muestras = 1);
   bool rop_sin_barrera_ = true;
   bool copia3d_pendiente_ = false;
   uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0, contenidos_llevados_ = 0;
