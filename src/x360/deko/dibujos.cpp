@@ -40,6 +40,9 @@ extern "C" const char* RexSwitchLogDir(void);
 // and not distributed. Without them the setting keeps the game's shader, as in the Vulkan build.
 
 // The same settings as the Vulkan build's (nfsmw_nativo_dibujos.cpp): names, types and defaults.
+REXCVAR_DEFINE_BOOL(deko_sin_prueba_profundidad, false, "deko3d",
+                    "Diagnostic: every depth test passes (writes stay as the game asks)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_sin_estencil, false, "deko3d",
                     "Diagnostic: stencil tests off (Halo 3's stencil is written through a colour view, not carried over yet)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1191,10 +1194,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   if (!cuenta) {
     return true;
   }
-  // Direct3D's fast clear: depth-only screen-space rectangles over a colour buffer (BorradoRapidoD3D).
-  if (modo_edram == 5 && tipo == 8 && (r[gr::XE_GPU_REG_PA_CL_VTE_CNTL] & 0x300) == 0x300 &&
-      BorradoRapidoD3D(r, cuenta)) {
-    return true;
+  // Direct3D's fast clear: depth-only screen-space rectangles over a colour buffer (BorradoRapidoD3D). The colour part
+  // is done there; the depth draw still goes on, as the depth it writes may be a real depth buffer's.
+  if (modo_edram == 5 && tipo == 8 && (r[gr::XE_GPU_REG_PA_CL_VTE_CNTL] & 0x300) == 0x300) {
+    BorradoRapidoD3D(r, cuenta);
   }
   DkPrimitive primitiva;
   bool admite_reinicio = false;
@@ -2002,7 +2005,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       // deko_sin_estencil (diagnostic): Halo 3 writes its stencil (a dither pattern) through a colour view of the depth
       // buffer's EDRAM, which is not carried into the depth image yet; without it every stencil test fails.
       static const bool sin_estencil = REXCVAR_GET(deko_sin_estencil);
+      static const bool sin_profundidad = REXCVAR_GET(deko_sin_prueba_profundidad);
       ds.stencilTestEnable = (d & 0x1) && !sin_estencil;
+      if (sin_profundidad) {
+        ds.depthCompareOp = DkCompareOp_Always;  // deko_sin_prueba_profundidad (diagnostic)
+      }
       repetible = repetible && !ds.depthWriteEnable && !ds.stencilTestEnable;
       ds.stencilFrontFailOp = DkStencilOp(((d >> 11) & 0x7) + 1);
       ds.stencilFrontPassOp = DkStencilOp(((d >> 14) & 0x7) + 1);
