@@ -145,6 +145,35 @@ constexpr uint32_t kVarianteZTemprana = 1;
 constexpr uint32_t kVarianteResplandorNatural = 2;
 constexpr uint32_t kVarianteResplandorSuave = 4;
 constexpr uint32_t kPalabraInvTamano = 90;
+// Words 128-159 (bytes 512-639): per texture slot, the sign mode of each output channel (bits 0-7, two bits each, after
+// the fetch constant's swizzle: 1 signed, 2 biased; 0 and gamma read as they are) and the width of the components the
+// signed mode reinterprets (bits 8-9: 1 = 8-bit, 2 = 16-bit, 0 = none). The prelude's tfetch applies them.
+constexpr uint32_t kPalabraSignos = 128;
+
+// A texture slot's sign word (kPalabraSignos) from its fetch constant.
+uint32_t PalabraSignos(const uint32_t* fetch) {
+  const uint32_t signos = (fetch[0] >> 2) & 0xFF;  // X, Y, Z, W: 0 unsigned, 1 signed, 2 biased, 3 gamma
+  const uint32_t swizzle = (fetch[3] >> 1) & 0xFFF;  // three bits per output channel: 0-3 a component, else 0 or 1
+  uint32_t modos = 0;
+  for (uint32_t c = 0; c < 4; ++c) {
+    const uint32_t fuente = (swizzle >> (c * 3)) & 0x7;
+    if (fuente < 4) {
+      const uint32_t modo = (signos >> (fuente * 2)) & 0x3;
+      if (modo == 1 || modo == 2) {
+        modos |= modo << (c * 2);
+      }
+    }
+  }
+  if (!modos) {
+    return 0;
+  }
+  const uint32_t formato = fetch[1] & 0x3F;
+  const uint32_t ancho = (formato >= 27 && formato <= 32) || (formato >= 36 && formato <= 38) || formato == 57
+                             ? 0u                                    // floats: nothing to reinterpret
+                             : (formato >= 24 && formato <= 26) ? 2u  // 16-bit components
+                                                                : 1u; // 8-bit and block formats
+  return modos | (ancho << 8);
+}
 constexpr uint32_t kMaxVerticesPorDibujo = uint32_t(1) << 20;
 constexpr uint32_t kUboBytesVs = 256 * 16;
 constexpr uint32_t kUboBytesPs = 256 * 16;  // NFS reads 224, Halo 3 all 256
@@ -1503,6 +1532,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       texturas = texturas_previas_.texturas;
       n_texturas = texturas_previas_.n_texturas;
       std::memcpy(compartidas + kPalabraInvTamano, texturas_previas_.inversos.data(), sizeof(texturas_previas_.inversos));
+      std::memcpy(compartidas + kPalabraSignos, texturas_previas_.signos.data(), sizeof(texturas_previas_.signos));
       tex0_ancho = texturas_previas_.tex0[0];
       tex0_alto = texturas_previas_.tex0[1];
       tex0_formato = texturas_previas_.tex0[2];
@@ -1568,6 +1598,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       if (sampler.registro < 16) {  // the shared block has 1/size for slots 0-15 (the shaders read 0 past that)
         std::memcpy(compartidas + kPalabraInvTamano + sampler.registro * 2, inv, sizeof(inv));
       }
+      if (sampler.registro < 32) {
+        compartidas[kPalabraSignos + sampler.registro] = PalabraSignos(fetch);
+      }
     }
     texturas_previas_.ps = ps;
     texturas_previas_.trabajo = trabajo_;
@@ -1579,6 +1612,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     texturas_previas_.texturas = texturas;
     texturas_previas_.n_texturas = n_texturas;
     std::memcpy(texturas_previas_.inversos.data(), compartidas + kPalabraInvTamano, sizeof(texturas_previas_.inversos));
+    std::memcpy(texturas_previas_.signos.data(), compartidas + kPalabraSignos, sizeof(texturas_previas_.signos));
     texturas_previas_.tex0 = {tex0_ancho, tex0_alto, tex0_formato, tex0_sampler};
   }
   // nfsmw_dk_diag_combinaciones: each new combination once, to stderr (the buffered log loses its tail when the
@@ -2184,7 +2218,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   cortar_etapa(4);
   static const bool por_diferencias = REXCVAR_GET(nfsmw_dk_constantes_por_diferencias);
   if (por_diferencias && !es_cielo) {
-    constexpr uint32_t kBloqueCompartidas = 512;  // dkCmdBufPushConstants wants the block size in 256-byte steps
+    constexpr uint32_t kBloqueCompartidas = 768;  // dkCmdBufPushConstants wants the block size in 256-byte steps
     if (bloques_trabajo_ != trabajo_) {
       // A new work: the blocks start as the registers are now (the GPU has not started this work: CPU writes).
       const deko::Subida v = nucleo_.Reservar(kUboBytesVs, DK_UNIFORM_BUF_ALIGNMENT);

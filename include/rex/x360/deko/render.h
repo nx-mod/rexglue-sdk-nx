@@ -707,6 +707,7 @@ class RenderDk final : public DestinosNativos {
     std::array<DkResHandle, 32> texturas{};
     uint32_t n_texturas = 0;
     std::array<uint32_t, 32> inversos{};
+    std::array<uint32_t, 32> signos{};  // the texture slots' sign words (kPalabraSignos)
     std::array<uint32_t, 4> tex0{};
   } texturas_previas_;
   uint64_t texturas_reusadas_ = 0, informe_texturas_reusadas_ = 0;
@@ -741,13 +742,13 @@ class RenderDk final : public DestinosNativos {
   DkGpuAddr bloque_vs_ = 0, bloque_ps_ = 0, bloque_compartidas_ = 0;
   std::array<uint32_t, 1024> sombra_vs_{};  // 256 registers
   std::array<uint32_t, 1024> sombra_ps_{};  // 256 registers
-  std::array<uint32_t, 128> sombra_compartidas_{};
+  std::array<uint32_t, 192> sombra_compartidas_{};
   uint64_t bloque_vs_generacion_ = UINT64_MAX, bloque_ps_generacion_ = UINT64_MAX;
   uint32_t bloque_vs_cubierto_ = 0, bloque_ps_cubierto_ = 0;  // bytes compared at that generation
   uint64_t registros_empujados_ = 0, empujes_ = 0, informe_registros_empujados_ = 0, informe_empujes_ = 0;
   // 32 float4: the deko3d library declares 31 (NFS), the translator's GLSL 32 (bytes 496-508: Halo 3's
   // render target exponent bias factors).
-  static constexpr uint32_t kPalabrasCompartidas = 128;
+  static constexpr uint32_t kPalabrasCompartidas = 192;
   uint32_t compartidas_previas_[kPalabrasCompartidas] = {};
   DkGpuAddr compartidas_gpu_ = 0;
   uint64_t compartidas_trabajo_ = UINT64_MAX;
