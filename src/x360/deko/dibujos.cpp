@@ -802,7 +802,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   g_.pase_alto = alto;
   ++serie_imagenes_;  // a new pass: the framing cache keys on it
   g_.pase_serie = serie_imagenes_;
-  pase_escala_ = 1.0f;
+  pase_escala_ = ((claves[4] >> 20) & 0x3) == 2 ? 2.0f : 1.0f;  // a 4x MSAA depth view (Dibujar): 2x2 samples a pixel
   return true;
 }
 
@@ -1252,7 +1252,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
 
   // --- Render targets and what can be skipped
-  const uint32_t pitch = r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF;
+  uint32_t pitch = r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF;
   const uint32_t mascara_registro =
       modo_edram == uint32_t(xenos::EdramMode::kColorDepth) ? r[gr::XE_GPU_REG_RB_COLOR_MASK] : 0;
   static constexpr uint32_t kInfoColor[4] = {gr::XE_GPU_REG_RB_COLOR_INFO, gr::XE_GPU_REG_RB_COLOR1_INFO,
@@ -1322,6 +1322,15 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     const uint32_t info = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
     claves[4] = (uint64_t(1) << 62) | (uint64_t(info & 0xFFF) << 24) | (uint64_t((info >> 16) & 0x1) << 16) | pitch;
     hay_destino = true;
+  }
+  // Direct3D clears a depth buffer through a 4x MSAA view: a surface half as wide (600 for Halo 3's 1200), each pixel
+  // 2x2 samples of the same EDRAM. A draw that writes only depth or stencil on a 4x surface goes to the 1x buffer at
+  // twice the pitch, its pass scaled by 2 (EmpezarPase), or it cleared a depth image of its own and the real one kept
+  // stale depth in all but the edge strip (a black box over Halo 3's scene). Colour on 4x surfaces is not done yet.
+  if (((r[gr::XE_GPU_REG_RB_SURFACE_INFO] >> 16) & 0x3) == 2 && claves[4] && !claves[0] && !claves[1] && !claves[2] &&
+      !claves[3]) {
+    pitch *= 2;
+    claves[4] = (claves[4] & ~uint64_t(0xFFFF)) | (uint64_t(2) << 20) | pitch;
   }
   if (!hay_destino || !pitch) {
     return true;  // writes nothing visible
