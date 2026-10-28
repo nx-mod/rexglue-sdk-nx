@@ -247,9 +247,7 @@ class RenderDk final : public DestinosNativos {
   void DestruirImagen(ImagenDk& imagen);
   // A new render target starts as the Vulkan path's: color 0, depth 1 and stencil 0.
   void PrepararDestino(ImagenDk& imagen);
-  // `x1_exacto`: the right edge before the 8-texel alignment (a 1x1 resolve is 8 wide once aligned).
-  bool Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1, int32_t& y1,
-                  int32_t* x1_exacto = nullptr);
+  bool Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1, int32_t& y1);
   void BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch);
   void CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool borrara);
   // A pending depth clear (ImagenDk::borrado_pendiente) recorded now on its own: before a copy or a swap reads it.
@@ -472,6 +470,7 @@ class RenderDk final : public DestinosNativos {
   uint8_t* lectura_cpu_ = nullptr;
   DkGpuAddr lectura_gpu_ = 0;
   uint64_t lecturas_hechas_ = 0, lecturas_escritas_ = 0, lecturas_sin_sitio_ = 0;
+  uint64_t siguiente_aviso_exposicion_ = 0;  // [exposicion] diagnostic: the frame of its next line
   // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are
   // not counted). Totals since start, as TiempoGpu gives them.
   std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp

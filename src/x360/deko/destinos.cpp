@@ -1053,7 +1053,7 @@ void RenderDk::Avisar(uint32_t causa, const char* texto) {
 
 // The copy rectangle, as the Vulkan path computes it (nfsmw_nativo_destinos.cpp, Rectangulo).
 bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1,
-                          int32_t& y1, int32_t* x1_exacto) {
+                          int32_t& y1) {
   const uint32_t tipo = reg.fetch_vertices[0] & 0x3;
   const uint32_t direccion = reg.fetch_vertices[0] >> 2;
   const auto orden = static_cast<xenos::Endian>(reg.fetch_vertices[1] & 0x3);
@@ -1099,9 +1099,6 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
   y0 = std::clamp(y0, arriba, abajo);
   x1 = std::clamp(x1, izquierda, derecha);
   y1 = std::clamp(y1, arriba, abajo);
-  if (x1_exacto) {
-    *x1_exacto = x1;
-  }
   x0 &= ~int32_t(7);  // D3D9 aligns to 8 (kResolveAlignmentPixels)
   y0 &= ~int32_t(7);
   x1 = (x1 + 7) & ~int32_t(7);
@@ -1155,8 +1152,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   if (!DestinoComoRgba8(formato_color)) {
     return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
   }
-  int32_t x0, y0, x1, y1, x1_exacto;
-  if (!Rectangulo(reg, pitch, x0, y0, x1, y1, &x1_exacto)) {
+  int32_t x0, y0, x1, y1;
+  if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
     return false;
   }
   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch, true);
@@ -1190,9 +1187,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       // the rest is padding: the texture is created at that width, or it is sampled across the padding too (with
       // nfsmw_resolucion_interna = escena_960x540 the 240-wide bloom lived in a 256-wide texture and the bloom,
       // shadows and reflections came out shifted to the left). At 1280x720 every resolved width is a multiple of 32.
-      // The width is the one before the 8-texel alignment: Halo 3 resolves its 1x1 exposure (and 18x10 steps) into
-      // pitch-32 textures, and an 8x1 texture is sampled at its unwritten middle texel (a black scene).
-      const uint32_t ancho_resolve = uint32_t(x0 == 0 ? std::min(x1_exacto, x1) - x0 : x1 - x0);
+      const uint32_t ancho_resolve = uint32_t(x1 - x0);
       const uint32_t ancho_textura =
           x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
       uint32_t filas_banda = 0;
@@ -1827,6 +1822,19 @@ void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, i
   }
 }
 
+// IEEE half to float, for the diagnostics.
+static float MedioAFlotante(uint16_t h) {
+  const uint32_t signo = uint32_t(h >> 15) << 31, exponente = (h >> 10) & 0x1F, mantisa = h & 0x3FF;
+  if (exponente == 0) {
+    return (signo ? -1.0f : 1.0f) * std::ldexp(float(mantisa), -24);
+  }
+  const uint32_t bits = exponente == 31 ? signo | 0x7F800000u | (mantisa << 13)
+                                        : signo | ((exponente + 112) << 23) | (mantisa << 13);
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+
 // Loaded with its fetch constant (GpuSwap per word and R8G8B8A8), each texel must give the same channels as the
 // resolved texture on the GPU: (B, G, R, A) with copy_dest_swap and (R, G, B, A) without it. As the Vulkan path.
 void RenderDk::EscribirLecturas(uint32_t ranura) {
@@ -1867,6 +1875,13 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
           std::memcpy(h, datos + (size_t(j) * p.ancho + i) * 8, 8);
           if (intercambio) {
             std::swap(h[0], h[2]);
+          }
+          // Halo 3's exposure: the 1-row float resolves its CPU reads back. Its first texel now and then.
+          if (p.alto_destino == 1 && i == 0 && fotograma_ >= siguiente_aviso_exposicion_) {
+            siguiente_aviso_exposicion_ = fotograma_ + 300;
+            std::fprintf(stderr, "[exposicion] f%llu %08X %ux%u: %g %g %g %g\n",
+                         static_cast<unsigned long long>(fotograma_), p.base, p.ancho, p.alto, MedioAFlotante(h[0]),
+                         MedioAFlotante(h[1]), MedioAFlotante(h[2]), MedioAFlotante(h[3]));
           }
           const uint32_t w[2] = {xenos::GpuSwap(uint32_t(h[0]) | (uint32_t(h[1]) << 16), orden),
                                  xenos::GpuSwap(uint32_t(h[2]) | (uint32_t(h[3]) << 16), orden)};

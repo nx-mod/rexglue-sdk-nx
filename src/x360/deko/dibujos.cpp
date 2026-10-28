@@ -2300,6 +2300,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
                                  (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1,
                                  (texturas[sampler.registro] & 0xFFFFF) < 3 ? "/VACIA" : "",
                                  TexturaResuelta(base) ? "/R" : "");
+            // A 1x1 texture (Halo 3's fade and tint colors): its word as the guest wrote it.
+            if (!(fetch[2] & 0x3FFFFFF) && !TexturaResuelta(base)) {
+              uint32_t palabra;
+              std::memcpy(&palabra, memoria_->TranslatePhysical(base), 4);
+              linea += fmt::format("/v{:08X}", palabra);
+            }
           }
         }
       }
