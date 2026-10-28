@@ -2501,6 +2501,16 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
     ++dibujos_en_pase_;
   }
+  // Halo 3's stencil, drawn as the red byte of 8_8_8_8 colour at the depth buffer's EDRAM base (an 8x8 dither pattern
+  // per tile): carried into the depth image's stencil (RestaurarEstencil), as the console reads that memory as depth.
+  if (claves[0] && !claves[1] && !claves[2] && !claves[3] && (mascaras & 0xF) == 0x1 &&
+      ((claves[0] >> 16) & 0xF) == 0 &&
+      uint32_t((claves[0] >> 24) & 0xFFF) == (r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF) && imagenes_pase_[0]) {
+    const uint32_t info_z = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
+    if (ImagenDk* z = DestinoProfundidad(info_z & 0xFFF, (info_z >> 16) & 0x1, pitch)) {
+      RestaurarEstencil(*imagenes_pase_[0], *z, tijera);
+    }
+  }
   ++dibujados_;
   cortar_etapa(5);
   ns_grabando_ += deko::AhoraNs() - inicio_ns - (nucleo_.NsEsperandoValla() - espera_inicio_ns);

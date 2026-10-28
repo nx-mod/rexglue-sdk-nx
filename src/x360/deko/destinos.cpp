@@ -372,6 +372,25 @@ void main() {
 }
 )";
 
+// The stencil restore (RestaurarEstencil): the red byte of the colour drawn at the depth buffer's base. Depth tiles hold
+// the two 40-sample halves of every 80-sample-wide tile swapped against colour tiles (as Xenia's render target cache
+// swaps them), so the texel with this pixel's byte is in the other half. bit < 0: every fragment (the clear pass);
+// otherwise only those whose byte has that bit.
+constexpr const char* kFsEstencil = R"(#version 460
+layout(binding = 0) uniform sampler2D origen;
+layout(std140, binding = 0) uniform Estencil {
+  ivec4 bit;
+} e;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = (p.x / 80) * 80 + ((p.x % 80) + 40) % 80;
+  uint byte = uint(round(clamp(texelFetch(origen, ivec2(x, p.y), 0).r, 0.0, 1.0) * 255.0));
+  if (e.bit.x >= 0 && ((byte >> uint(e.bit.x)) & 1u) == 0u) {
+    discard;
+  }
+}
+)";
+
 constexpr uint32_t kRampaExacta = 1, kRampaGraduacion = 2, kRampaFxaa = 4;
 constexpr uint32_t kBytesUboRampa = 4 * 16;  // mezcla, efectos, desplazamiento, inverso (the ramp is a texture)
 
@@ -964,6 +983,70 @@ void RenderDk::EscribirPasos() {
     DestruirImagen(p.imagen);
     pasos_.erase(pasos_.begin() + i);
   }
+}
+
+void RenderDk::RestaurarEstencil(const ImagenDk& color, ImagenDk& profundidad, const DkScissor& rect) {
+  if (!vs_salida_valido_ || !fs_estencil_valido_ || !rect.width || !rect.height) {
+    return;
+  }
+  AsegurarTrabajo();
+  EmitirCieloPendiente();
+  HacerBorradoPendiente(profundidad);  // a pending clear first: the stencil written here must survive it
+  const uint32_t ranura = VistaDe(color, 0x688, 0x688);
+  DkCmdBuf cmd = nucleo_.comandos();
+  MarcarGpu(kGpuBorrados);
+  // The colour was just drawn: its writes must reach the texture units.
+  dkCmdBufBarrier(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
+  ++barreras_fragmentos_;
+  DkImageView vista;
+  dkImageViewDefaults(&vista, &profundidad.imagen);
+  dkCmdBufBindRenderTargets(cmd, nullptr, 0, &vista);
+  const DkViewport vp = {float(rect.x), float(rect.y), float(rect.width), float(rect.height), 0.0f, 1.0f};
+  dkCmdBufSetViewports(cmd, 0, &vp, 1);
+  static const DkViewportSwizzle kIdentidad = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
+                                                DkSwizzle_PositiveW};
+  dkCmdBufSetViewportSwizzles(cmd, 0, &kIdentidad, 1);
+  dkCmdBufSetScissors(cmd, 0, &rect, 1);
+  DkRasterizerState rs;
+  dkRasterizerStateDefaults(&rs);
+  rs.cullMode = DkFace_None;
+  DkColorState cs;
+  dkColorStateDefaults(&cs);
+  DkColorWriteState cws;
+  dkColorWriteStateDefaults(&cws);
+  cws.masks = 0;
+  DkDepthStencilState ds;
+  dkDepthStencilStateDefaults(&ds);  // stencil ops replace, compare always
+  ds.depthTestEnable = false;
+  ds.depthWriteEnable = false;
+  ds.stencilTestEnable = true;
+  dkCmdBufBindRasterizerState(cmd, &rs);
+  dkCmdBufBindColorState(cmd, &cs);
+  dkCmdBufBindColorWriteState(cmd, &cws);
+  dkCmdBufBindDepthStencilState(cmd, &ds);
+  dkCmdBufBindVtxAttribState(cmd, nullptr, 0);
+  dkCmdBufBindVtxBufferState(cmd, nullptr, 0);
+  const DkShader* shaders[2] = {&vs_salida_, &fs_estencil_};
+  dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
+  dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
+  // The clear pass (write mask 0xFF, reference 0, every fragment), then one pass per bit (write mask 1 << bit,
+  // reference 0xFF, only the fragments whose byte has it).
+  for (int32_t bit = -1; bit < 8; ++bit) {
+    const deko::Subida ubo = Reservar(256, DK_UNIFORM_BUF_ALIGNMENT);
+    if (!ubo) {
+      break;
+    }
+    const int32_t datos[4] = {bit, 0, 0, 0};
+    std::memcpy(ubo.cpu, datos, sizeof(datos));
+    dkCmdBufBindUniformBuffer(nucleo_.comandos(), DkStage_Fragment, 0, ubo.gpu, 256);
+    const uint8_t mascara = bit < 0 ? 0xFF : uint8_t(1u << bit);
+    dkCmdBufSetStencil(nucleo_.comandos(), DkFace_FrontAndBack, mascara, bit < 0 ? 0x00 : 0xFF, 0xFF);
+    dkCmdBufDraw(nucleo_.comandos(), DkPrimitive_Triangles, 3, 1, 0, 0);
+  }
+  ++estenciles_restaurados_;
+  invalidar_zcull_ = true;  // ZCULL culls by stencil too
+  rop_sin_barrera_ = true;
+  OlvidarEstado();
 }
 
 deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
@@ -2332,6 +2415,11 @@ bool RenderDk::CrearShadersSalida() {
   if (!fs_copia_color_valido_ || !fs_copia_profundidad_valido_) {
     REXLOG_ERROR("[deko3d] no se pudieron compilar las copias en el motor 3D ({} / {}): se copia con el motor de copias",
                  color.log, z.log);
+  }
+  const deko::Compilador::Resultado estencil = compilador_.Compilar(false, kFsEstencil);
+  fs_estencil_valido_ = estencil.ok && nucleo_.CargarShader(fs_estencil_, estencil.dksh, "estencil desde color");
+  if (!fs_estencil_valido_) {
+    REXLOG_ERROR("[deko3d] no se pudo compilar la restauracion del estencil: {}", estencil.log);
   }
   return vs_salida_valido_ && ShaderRampa(kRampaExacta) != nullptr;
 }
