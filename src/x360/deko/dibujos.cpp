@@ -2374,6 +2374,20 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
           linea += fmt::format(" c{}=({:.3g},{:.3g},{:.3g},{:.3g})", c, v[0], v[1], v[2], v[3]);
         }
       }
+      // The depth path: PA_CL_VTE_CNTL, ZSCALE/ZOFFSET, PA_CL_CLIP_CNTL, the host depth range; for a draw without a
+      // pixel shader (depth-only, Direct3D's clears) the first vertex's z as fetch constant 0 holds it.
+      linea += fmt::format(" vte={:03X} zs={:.4g} zo={:.4g} clip={:08X} rango={:.4g}..{:.4g}",
+                           r[gr::XE_GPU_REG_PA_CL_VTE_CNTL], Flotante(r[gr::XE_GPU_REG_PA_CL_VPORT_ZSCALE]),
+                           Flotante(r[gr::XE_GPU_REG_PA_CL_VPORT_ZOFFSET]), r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL],
+                           viewport[4], viewport[5]);
+      if (!ps && (r[kRegFetch] & 0x3) == uint32_t(xenos::FetchConstantType::kVertex)) {
+        uint32_t crudo;
+        std::memcpy(&crudo, memoria_->TranslatePhysical((r[kRegFetch] & ~0x3u) + 8), 4);
+        crudo = xenos::GpuSwap(crudo, static_cast<xenos::Endian>(r[kRegFetch + 1] & 0x3));
+        float z;
+        std::memcpy(&z, &crudo, 4);
+        linea += fmt::format(" z_vertice={:.4g}", z);
+      }
       // Where it draws: each color target's EDRAM base and format, and the depth one.
       for (uint32_t i = 0; i < 5; ++i) {
         if (claves[i]) {
