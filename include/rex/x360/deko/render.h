@@ -247,7 +247,9 @@ class RenderDk final : public DestinosNativos {
   void DestruirImagen(ImagenDk& imagen);
   // A new render target starts as the Vulkan path's: color 0, depth 1 and stencil 0.
   void PrepararDestino(ImagenDk& imagen);
-  bool Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1, int32_t& y1);
+  // `x1_exacto`: the right edge before the 8-texel alignment (a 1x1 resolve is 8 wide once aligned).
+  bool Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1, int32_t& y1,
+                  int32_t* x1_exacto = nullptr);
   void BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch);
   void CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool borrara);
   // A pending depth clear (ImagenDk::borrado_pendiente) recorded now on its own: before a copy or a swap reads it.
@@ -409,6 +411,7 @@ class RenderDk final : public DestinosNativos {
     uint16_t swizzle_host = 0;
     bool ctx1 = false;  // k_CTX1: guest blocks of 4x4 (8 bytes), decoded on the CPU to the host's RG8 texels
     bool rgba4 = false;  // k_4_4_4_4: guest 16-bit texels, expanded on the CPU to the host's RGBA8
+    bool dxt3a = false;  // k_DXT3A: guest blocks of 4x4 4-bit alphas (8 bytes), decoded on the CPU to the host's R8
   };
   static bool FormatoDe(uint32_t formato, FormatoDk& f);
   // The descriptor slot of the texture a fetch constant names (0 = the empty one of that type), with what the shader

@@ -110,6 +110,25 @@ void DecodificarCtx1(const uint8_t* bloques, uint32_t bx, uint32_t by, uint32_t 
   }
 }
 
+// k_DXT3A, as Xenia's DXT3A load shader: each 8-byte block (in host order) holds 16 4-bit alphas, texel (x, y) at
+// bits 4 * (x + 4 * y). `ancho` x `alto` texels of R8 out, from bx x by blocks.
+void DecodificarDxt3a(const uint8_t* bloques, uint32_t bx, uint32_t by, uint32_t ancho, uint32_t alto, uint8_t* r8) {
+  for (uint32_t j = 0; j < by; ++j) {
+    for (uint32_t i = 0; i < bx; ++i) {
+      uint64_t alfas;
+      std::memcpy(&alfas, bloques + (size_t(j) * bx + i) * 8, 8);
+      for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
+          const uint32_t px = i * 4 + x, py = j * 4 + y;
+          if (px < ancho && py < alto) {
+            r8[size_t(py) * ancho + px] = uint8_t(((alfas >> ((x + 4 * y) * 4)) & 0xF) * 17);
+          }
+        }
+      }
+    }
+  }
+}
+
 // k_4_4_4_4 to RGBA8: each 16-bit texel (in host order) holds R in bits 0-3, G 4-7, B 8-11, A 12-15, the layout both
 // of Xenia's load shaders imply (the Vulkan one rotates it to B4G4R4A4, the D3D12 one swaps red and blue for DXGI's).
 void ExpandirRgba4(const uint8_t* origen, size_t texeles, uint8_t* rgba) {
@@ -177,6 +196,9 @@ bool RenderDk::FormatoDe(uint32_t formato, FormatoDk& f) {
       return true;
     case 59:  // k_DXT5A
       f = {DkImageFormat_R_BC4_Unorm, 4, 8, 2, kSwizzleRRRR};
+      return true;
+    case 58:  // k_DXT3A: no host format, R8 decoded (DecodificarDxt3a)
+      f = {DkImageFormat_R8_Unorm, 4, 8, 2, kSwizzleRRRR, false, false, true};
       return true;
     case 24:  // k_16
       f = {DkImageFormat_R16_Unorm, 1, 2, 2, kSwizzleRRRR};
@@ -917,6 +939,32 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     desplazamiento_nivel = desplazamiento_rg;
     th.bloque = 1;
     th.bytes = 2;
+  }
+  // k_DXT3A: the untiled blocks become R8 texels, as k_CTX1's become RG8.
+  if (tf.dxt3a) {
+    std::vector<uint8_t> texeles;
+    size_t total = 0;
+    std::array<size_t, 16> desplazamiento_r{};
+    std::array<size_t, 16> bytes_capa_r{};
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      desplazamiento_r[n] = total;
+      bytes_capa_r[n] = size_t(std::max(img.ancho >> n, 1u)) * std::max(img.alto >> n, 1u);
+      total += bytes_capa_r[n] * capas;
+    }
+    texeles.assign(total, 0);
+    for (uint32_t n = 0; n < img.niveles; ++n) {
+      const uint32_t bx = (std::max(img.ancho >> n, 1u) + 3) / 4, by = (std::max(img.alto >> n, 1u) + 3) / 4;
+      for (uint32_t c = 0; c < capas; ++c) {
+        DecodificarDxt3a(temporal_.data() + desplazamiento_nivel[n] + bytes_capa_nivel[n] * c, bx, by,
+                         std::max(img.ancho >> n, 1u), std::max(img.alto >> n, 1u),
+                         texeles.data() + desplazamiento_r[n] + bytes_capa_r[n] * c);
+      }
+    }
+    temporal_.swap(texeles);
+    bytes_datos = total;
+    desplazamiento_nivel = desplazamiento_r;
+    th.bloque = 1;
+    th.bytes = 1;
   }
   // k_4_4_4_4: the untiled 16-bit texels become RGBA8, level by level.
   if (tf.rgba4) {

@@ -1053,7 +1053,7 @@ void RenderDk::Avisar(uint32_t causa, const char* texto) {
 
 // The copy rectangle, as the Vulkan path computes it (nfsmw_nativo_destinos.cpp, Rectangulo).
 bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0, int32_t& y0, int32_t& x1,
-                          int32_t& y1) {
+                          int32_t& y1, int32_t* x1_exacto) {
   const uint32_t tipo = reg.fetch_vertices[0] & 0x3;
   const uint32_t direccion = reg.fetch_vertices[0] >> 2;
   const auto orden = static_cast<xenos::Endian>(reg.fetch_vertices[1] & 0x3);
@@ -1099,6 +1099,9 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
   y0 = std::clamp(y0, arriba, abajo);
   x1 = std::clamp(x1, izquierda, derecha);
   y1 = std::clamp(y1, arriba, abajo);
+  if (x1_exacto) {
+    *x1_exacto = x1;
+  }
   x0 &= ~int32_t(7);  // D3D9 aligns to 8 (kResolveAlignmentPixels)
   y0 &= ~int32_t(7);
   x1 = (x1 + 7) & ~int32_t(7);
@@ -1152,8 +1155,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   if (!DestinoComoRgba8(formato_color)) {
     return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
   }
-  int32_t x0, y0, x1, y1;
-  if (!Rectangulo(reg, pitch, x0, y0, x1, y1)) {
+  int32_t x0, y0, x1, y1, x1_exacto;
+  if (!Rectangulo(reg, pitch, x0, y0, x1, y1, &x1_exacto)) {
     return false;
   }
   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch, true);
@@ -1187,7 +1190,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
       // the rest is padding: the texture is created at that width, or it is sampled across the padding too (with
       // nfsmw_resolucion_interna = escena_960x540 the 240-wide bloom lived in a 256-wide texture and the bloom,
       // shadows and reflections came out shifted to the left). At 1280x720 every resolved width is a multiple of 32.
-      const uint32_t ancho_resolve = uint32_t(x1 - x0);
+      // The width is the one before the 8-texel alignment: Halo 3 resolves its 1x1 exposure (and 18x10 steps) into
+      // pitch-32 textures, and an 8x1 texture is sampled at its unwritten middle texel (a black scene).
+      const uint32_t ancho_resolve = uint32_t(x0 == 0 ? std::min(x1_exacto, x1) - x0 : x1 - x0);
       const uint32_t ancho_textura =
           x0 == 0 && ancho_resolve < pitch_destino && ancho_resolve + 32 > pitch_destino ? ancho_resolve : pitch_destino;
       uint32_t filas_banda = 0;
