@@ -631,14 +631,11 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
   // A negative YSCALE (the D3D norm) gives a positive height; a positive one, an inverted height.
   viewport[1] = centro_y + escala_y;
   viewport[3] = -2.0f * escala_y;
-  // OpenGL clip space (dx_clip_space_def = 0): the translated vertex shaders take z from -w..w to 0..w (byte 492), so
-  // the range the guest's ZOFFSET and ZSCALE give from -1..1 is near = offset - scale, far = offset + scale (Xenia's
-  // GetHostViewportInfo). Without it Direct3D's depth clear wrote 0.5 for 0 and Halo 3's GREATER_EQUAL scene failed.
-  const bool z_opengl = !((r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1);
-  if (z_opengl) {
-    Avisar(14, "espacio de recorte OpenGL (dx_clip_space_def = 0): Z ajustada por los shaders traducidos (byte 492)");
-  }
-  viewport[4] = std::clamp(z_opengl ? centro_z - escala_z : centro_z, 0.0f, 1.0f);
+  // Depth is ZOFFSET + ZSCALE * z in either clip space (dx_clip_space_def only changes what the Xenos clips; Xenia
+  // remaps OpenGL's -w..w and compensates the range, the same depth in the end). z is not remapped here: Direct3D's
+  // depth clear (OpenGL space, clipping off, z 0) wrote 0.5 through the remap, as a range can't start below 0, and
+  // Halo 3's GREATER_EQUAL scene failed everywhere but close up.
+  viewport[4] = std::clamp(centro_z, 0.0f, 1.0f);
   viewport[5] = std::clamp(centro_z + escala_z, 0.0f, 1.0f);
   ndc[0] = 1.0f;
   ndc[1] = 1.0f;
@@ -1853,9 +1850,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // or from 0 without indices), so a shader that reads whole buffers by vertex index (Halo 3's translator, r0.x) adds
   // it back to gl_VertexID.
   compartidas[122] = vmin;
-  // Byte 492: 1.0 when the draw is in OpenGL clip space (dx_clip_space_def = 0, z from -w to w): the translator's vertex
-  // shaders then remap z to the host's 0..w (Halo 3; NFS's shaders do not read it).
-  const float z_opengl = (r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 19) & 0x1 ? 0.0f : 1.0f;
+  // Byte 492: the translated vertex shaders remap z from -w..w to 0..w when it is 1.0. Kept at 0: the depth is ZOFFSET +
+  // ZSCALE * z in either clip space (CalcularEncuadre).
+  const float z_opengl = 0.0f;
   std::memcpy(&compartidas[123], &z_opengl, sizeof(z_opengl));
   // Bytes 496-508: 2^RB_COLOR_INFO color_exp_bias (signed, bits 20-25) per render target, which the translator's pixel
   // shaders multiply their outputs by (the Xenos scales what reaches a target; Halo 3 writes its final image to 7e3
