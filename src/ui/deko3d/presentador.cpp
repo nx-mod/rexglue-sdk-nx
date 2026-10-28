@@ -2,6 +2,7 @@
 
 #include <rex/ui/deko3d/presentador.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/logging/api.h>
 #include <rex/ui/surface_switch.h>
@@ -12,6 +13,11 @@
 #include <cstddef>
 #include <cstring>
 #include <vector>
+
+REXCVAR_DEFINE_BOOL(deko_zcull, true, "deko3d",
+                    "The GPU's hierarchical depth cull (ZCULL) on the graphics queue. Testing: Halo 3 tests depth "
+                    "GREATER_EQUAL (reversed depth), which a ZCULL set up for LESS would cull wrongly")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex::deko3d {
 namespace {
@@ -610,11 +616,12 @@ TexturaDeko3d::~TexturaDeko3d() {
 // ---- The provider
 
 std::unique_ptr<ProveedorDeko3d> ProveedorDeko3d::Crear() {
+  static const bool zcull = REXCVAR_GET(deko_zcull);
   // The core's lines (device, memory blocks, uam, errors) into the game's log, logs/nfsmw_NNN.log next to the NRO.
   // A deko3d failure ends the process: the core flushes before every creation and before Fatal.
   FijarRegistro([](const char* linea) { REXLOG_INFO("{}", linea); }, [] { rex::FlushLogging(); });
   std::unique_ptr<ProveedorDeko3d> p(new ProveedorDeko3d());
-  p->dispositivo_.Crear(true);
+  p->dispositivo_.Crear(zcull);
   p->compilador_ = std::make_unique<Compilador>();
   return p;
 }
