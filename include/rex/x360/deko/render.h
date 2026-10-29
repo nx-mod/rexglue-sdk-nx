@@ -525,7 +525,8 @@ class RenderDk final : public DestinosNativos {
   static constexpr uint32_t kGpuSubBorradoPase = 32, kGpuSubBorradoRapido = 33, kGpuSubEstencil = 34,
                             kGpuSubPreparar = 35, kGpuSubPendiente = 36, kGpuSubBanda = 37, kGpuSubBorrados = 6;
   std::array<uint64_t, kGpuSubBorrados> gpu_sub_borrados_ns_{}, informe_sub_borrados_{};
-  uint64_t marca_fin_previa_ = 0;  // raw end timestamp of the last work read
+  uint64_t marca_fin_previa_ = 0;
+  std::array<uint64_t, 4> fin_fotogramas_{};  // the last work of each recent frame (deko_fotogramas_en_vuelo)  // raw end timestamp of the last work read
   // nfsmw_nativo_saltar_borrados_repetidos: per image (its serie), the last clear value while nothing has been
   // drawn since (the global draw count then).
   struct EstadoBorrado {

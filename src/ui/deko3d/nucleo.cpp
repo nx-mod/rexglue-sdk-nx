@@ -409,6 +409,21 @@ bool Nucleo::TrabajoTerminado(uint64_t trabajo) {
   return !r.vallada || dkFenceWait(&r.valla, 0) == DkResult_Success;
 }
 
+void Nucleo::EsperarTrabajo(uint64_t trabajo, uint64_t ultimo) {
+  if (ultimo >= trabajo + config_.ranuras) {
+    return;
+  }
+  Ranura& r = ranuras_[trabajo % config_.ranuras];
+  if (!r.vallada) {
+    return;
+  }
+  const uint64_t antes = AhoraNs();
+  while (dkFenceWait(&r.valla, 2'000'000'000ll) != DkResult_Success) {
+    disp_->ComprobarCola("esperar el trabajo de un fotograma");
+  }
+  ns_esperando_valla_ += AhoraNs() - antes;
+}
+
 Subida Nucleo::Reservar(uint32_t bytes, uint32_t alineacion) {
   Ranura& r = ranuras_[ranura_];
   const uint32_t rebanada = config_.mb_subida << 20;

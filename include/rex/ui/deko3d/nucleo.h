@@ -172,6 +172,9 @@ class Nucleo {
   bool TrabajoAbierto() const { return abierto_; }
   // The GPU has finished work number `trabajo` (no wait).
   bool TrabajoTerminado(uint64_t trabajo);
+  // Waits until the GPU has finished work number `trabajo`; `ultimo` is the last work opened (if its slot has been
+  // opened again since, EmpezarTrabajo already waited for it). Counted in NsEsperandoValla.
+  void EsperarTrabajo(uint64_t trabajo, uint64_t ultimo);
   // Nanoseconds spent waiting for slot fences in EmpezarTrabajo since start (the GPU being behind, not recording).
   uint64_t NsEsperandoValla() const { return ns_esperando_valla_; }
   // Submits what was recorded so far in the middle of a slot (without its fence) and keeps recording.

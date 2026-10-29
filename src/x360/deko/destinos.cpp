@@ -41,6 +41,11 @@ REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
                      "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of each kind, menu (under 1000 draws) "
                      "and game, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(deko_fotogramas_en_vuelo, 1, "deko3d",
+                     "Frames the game may record ahead of the one the GPU finishes: each one more is a frame later to "
+                     "the screen and no faster once the GPU is the limit. 0 = only the work slots limit it")
+    .range(0, 3)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_destinos_flotantes, false, "deko3d",
                     "Testing: 64-bit render targets and resolves as RGBA16F instead of RGBA8 (Halo 3's exposure chain); "
                     "off = everything RGBA8 as before")
@@ -2787,6 +2792,17 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   }
   if (const int32_t pedida = g_volcar_dibujos_captura.exchange(0, std::memory_order_relaxed)) {
     volcando_captura_ = pedida;
+  }
+  // Frames in flight (deko_fotogramas_en_vuelo): the GPU has finished the frame before this one when this one is
+  // closed, so the game records at most one frame ahead of the one the GPU draws. With three work slots it ran two
+  // or three ahead: no faster when the GPU is the limit, only that many frames later to the screen (at 8 fps, a
+  // third of a second from the stick to the picture).
+  static const int32_t en_vuelo = REXCVAR_GET(deko_fotogramas_en_vuelo);
+  if (en_vuelo > 0) {
+    fin_fotogramas_[fotograma_ % 4] = trabajo_;
+    if (fotograma_ >= uint64_t(en_vuelo)) {
+      nucleo_.EsperarTrabajo(fin_fotogramas_[(fotograma_ - uint64_t(en_vuelo)) % 4], trabajo_);
+    }
   }
   ++fotograma_;
   geometria_.NuevoFotograma(fotograma_);
