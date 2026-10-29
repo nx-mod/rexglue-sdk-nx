@@ -237,8 +237,9 @@ class RenderDk final : public DestinosNativos {
   bool rop_sin_barrera_ = true;
   bool copia3d_pendiente_ = false;
   uint64_t copias_3d_ = 0, barreras_fragmentos_ = 0, contenidos_llevados_ = 0;
-  DkShader fs_copia_color_{}, fs_copia_profundidad_{}, fs_estencil_{};
+  DkShader fs_copia_color_{}, fs_copia_profundidad_{}, fs_estencil_{}, fs_estencil_exportado_{};
   bool fs_copia_color_valido_ = false, fs_copia_profundidad_valido_ = false, fs_estencil_valido_ = false;
+  bool fs_estencil_exportado_valido_ = false;  // the whole byte in one pass (gl_FragStencilRefARB)
   // Halo 3 draws its stencil (an 8x8 dither pattern, objects' fade levels test against it) as the red byte of 8_8_8_8
   // colour at the depth buffer's EDRAM base. With separate images, that red byte is carried into the depth image's
   // stencil here, a bit per pass (no stencil export): the rectangle drawn.

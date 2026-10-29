@@ -394,6 +394,18 @@ void main() {
 }
 )";
 
+// The same restore in one pass: the fragment exports the byte as its stencil reference (ARB_shader_stencil_export,
+// which Maxwell has), and the replace op writes it. Nine passes over the target cost Halo 3's menu 89 ms a frame.
+constexpr const char* kFsEstencilExportado = R"(#version 460
+#extension GL_ARB_shader_stencil_export : require
+layout(binding = 0) uniform sampler2D origen;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = (p.x / 80) * 80 + ((p.x % 80) + 40) % 80;
+  gl_FragStencilRefARB = int(round(clamp(texelFetch(origen, ivec2(x, p.y), 0).r, 0.0, 1.0) * 255.0));
+}
+)";
+
 constexpr uint32_t kRampaExacta = 1, kRampaGraduacion = 2, kRampaFxaa = 4;
 constexpr uint32_t kBytesUboRampa = 4 * 16;  // mezcla, efectos, desplazamiento, inverso (the ramp is a texture)
 
@@ -1035,12 +1047,17 @@ void RenderDk::RestaurarEstencil(const ImagenDk& color, ImagenDk& profundidad, c
   dkCmdBufBindDepthStencilState(cmd, &ds);
   dkCmdBufBindVtxAttribState(cmd, nullptr, 0);
   dkCmdBufBindVtxBufferState(cmd, nullptr, 0);
-  const DkShader* shaders[2] = {&vs_salida_, &fs_estencil_};
+  const DkShader* shaders[2] = {&vs_salida_, fs_estencil_exportado_valido_ ? &fs_estencil_exportado_ : &fs_estencil_};
   dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
   dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
+  if (fs_estencil_exportado_valido_) {
+    // Every fragment, write mask 0xFF: the replace op writes the exported reference.
+    dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, 0xFF, 0x00, 0xFF);
+    dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+  }
   // The clear pass (write mask 0xFF, reference 0, every fragment), then one pass per bit (write mask 1 << bit,
   // reference 0xFF, only the fragments whose byte has it).
-  for (int32_t bit = -1; bit < 8; ++bit) {
+  for (int32_t bit = -1; bit < 8 && !fs_estencil_exportado_valido_; ++bit) {
     const deko::Subida ubo = Reservar(256, DK_UNIFORM_BUF_ALIGNMENT);
     if (!ubo) {
       break;
@@ -2441,6 +2458,12 @@ bool RenderDk::CrearShadersSalida() {
   fs_estencil_valido_ = estencil.ok && nucleo_.CargarShader(fs_estencil_, estencil.dksh, "estencil desde color");
   if (!fs_estencil_valido_) {
     REXLOG_ERROR("[deko3d] no se pudo compilar la restauracion del estencil: {}", estencil.log);
+  }
+  const deko::Compilador::Resultado exportado = compilador_.Compilar(false, kFsEstencilExportado);
+  fs_estencil_exportado_valido_ =
+      exportado.ok && nucleo_.CargarShader(fs_estencil_exportado_, exportado.dksh, "estencil exportado desde color");
+  if (!fs_estencil_exportado_valido_) {
+    REXLOG_WARN("[deko3d] sin estencil exportado ({}): la restauracion va bit a bit", exportado.log);
   }
   return vs_salida_valido_ && ShaderRampa(kRampaExacta) != nullptr;
 }
