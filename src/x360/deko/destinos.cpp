@@ -235,6 +235,21 @@ DkImageView VistaCompleta(const DkImage& imagen) {
 std::filesystem::path RutaCache() { return rex::filesystem::GetExecutableFolder() / "cache" / "nfsmw_dksh.bin"; }
 std::filesystem::path RutaDiario() { return RutaCache().string() + ".diario"; }
 
+// A whole file in one read (istreambuf_iterator went a byte at a time: seconds for the 18 MB cache on the console).
+bool LeerArchivo(const std::filesystem::path& ruta, std::vector<uint8_t>& datos) {
+  std::ifstream f(ruta, std::ios::binary | std::ios::ate);
+  if (!f) {
+    return false;
+  }
+  const std::streamsize bytes = f.tellg();
+  if (bytes < 0) {
+    return false;
+  }
+  datos.resize(size_t(bytes));
+  f.seekg(0);
+  return bytes == 0 || bool(f.read(reinterpret_cast<char*>(datos.data()), bytes));
+}
+
 // The whole file, through a temporary and a rename (a cut write leaves the old one).
 bool EscribirArchivo(const std::filesystem::path& ruta, const std::vector<uint8_t>& datos) {
   std::error_code error;
@@ -483,11 +498,10 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   std::string motivo;
   for (const std::filesystem::path& ruta :
        {RutaCache(), rex::filesystem::GetExecutableFolder() / "shadercache_dksh.bin"}) {
-    std::ifstream f(ruta, std::ios::binary);
-    if (!f) {
+    std::vector<uint8_t> datos;
+    if (!LeerArchivo(ruta, datos)) {
       continue;
     }
-    std::vector<uint8_t> datos((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (cache_.Cargar(datos, motivo)) {
       REXLOG_INFO("[deko3d] cache de DKSH: {} entradas de {}", cache_.size(), ruta.string());
       break;
@@ -497,9 +511,14 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   {
     // The journal of the last runs (GuardarCacheSiHaceFalta): merged, then written into the file once, here at start
     // and on the writer thread, so the journal starts empty.
-    std::ifstream f(RutaDiario(), std::ios::binary);
-    if (f) {
-      std::vector<uint8_t> datos((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> datos;
+    bool hay_diario = false;
+    {
+      // Closed before it may be deleted: the SD card's filesystem keeps an open file (a journal in an old format,
+      // never deleted, threw away every run's new shaders at the next start).
+      hay_diario = LeerArchivo(RutaDiario(), datos);
+    }
+    if (hay_diario) {
       const int anadidas = cache_.CargarDiario(datos);
       REXLOG_INFO("[deko3d] diario de la cache de DKSH: {} entradas ({} KB)", anadidas, datos.size() >> 10);
       if (anadidas > 0) {
