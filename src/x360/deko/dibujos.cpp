@@ -1764,14 +1764,31 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   for (uint32_t i = 0; i < n_buferes_vf; ++i) {
     const BuferVf& v = buferes_vf[i];
     const uint32_t tam = (std::max(v.bytes, 16u) + 15) & ~15u;
+    // Kept from an earlier frame with the same content (the geometry store, as the vertex streams): Halo 3 reads all
+    // its vertices this way, and copying and byte-swapping each range every draw was most of the 24-29 MB a frame
+    // the ring thread wrote.
+    if (v.bytes && geometria_.activo()) {
+      const deko::AlmacenGeometria::Resultado en_almacen = geometria_.Buscar(
+          v.datos, v.bytes, uint64_t(v.orden), tam, [&](uint8_t* destino, uint32_t&, uint32_t&) {
+            CopiarVertices(TrabajoCopia{v.datos, destino, v.bytes / 4, v.orden});
+            if (tam > v.bytes) {
+              std::memset(destino + v.bytes, 0, tam - v.bytes);
+            }
+          });
+      if (en_almacen.gpu) {
+        geometria_.Usar(en_almacen.entrada, trabajo_);
+        dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, en_almacen.gpu - v.inicio, tam + v.inicio);
+        continue;
+      }
+    }
     const deko::Subida s = nucleo_.Reservar(tam, DK_UNIFORM_BUF_ALIGNMENT);
     if (!s) {
       return Rechazar(13, "sin sitio en el anillo de subida");
     }
-    std::memset(s.cpu, 0, tam);
     if (v.bytes) {
       CopiarVertices(TrabajoCopia{v.datos, s.cpu, v.bytes / 4, v.orden});  // byte-swapped as vertex data
     }
+    std::memset(s.cpu + v.bytes, 0, tam - v.bytes);  // only the padding: the ring is CPU-uncached
     dkCmdBufBindStorageBuffer(cmd, v.etapa, v.enlace, s.gpu - v.inicio, tam + v.inicio);
   }
   if (bloque_halo) {
