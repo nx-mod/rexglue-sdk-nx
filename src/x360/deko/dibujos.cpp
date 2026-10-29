@@ -1798,6 +1798,44 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     encuadre_generacion_ = p.generacion_encuadre;
     encuadre_pase_serie_ = g_.pase_serie;
   }
+  // A target holds only the rows that fit in the EDRAM before the next bound target's base (2048 tiles of 80x16
+  // samples in all): the console draws nothing below them. Halo 3's 4x menu tiles keep 160 of the pass's rows;
+  // drawn whole, each tile shaded the full screen and marked the other targets' tiles as its own. Not for the
+  // shadow targets, larger here than on the console.
+  if (!vacio && !destino_sombras) {
+    const uint32_t info = r[gr::XE_GPU_REG_RB_SURFACE_INFO];
+    const uint32_t muestras_4x = ((info >> 16) & 0x3) == 2 ? 2 : 1;
+    const uint32_t filas_por_franja = ((info >> 16) & 0x3) ? 8 : 16;
+    const uint32_t losas_fila = ((info & 0x3FFF) * muestras_4x + 79) / 80;
+    uint32_t filas = UINT32_MAX;
+    for (uint32_t i = 0; i < 5; ++i) {
+      if (!claves[i]) {
+        continue;
+      }
+      const uint32_t base = uint32_t(claves[i] >> 24) & 0xFFF;
+      uint32_t fin = 2048;
+      for (uint32_t k = 0; k < 5; ++k) {
+        const uint32_t otra = uint32_t(claves[k] >> 24) & 0xFFF;
+        if (claves[k] && otra > base) {
+          fin = std::min(fin, otra);
+        }
+      }
+      const uint32_t formato = uint32_t(claves[i] >> 16) & 0xF;
+      const bool doble = i < 4 && (formato == 5 || formato == 7 || formato == 15);  // 64 bits per sample
+      const uint32_t losas = losas_fila * (doble ? 2 : 1);
+      if (losas && fin > base) {
+        filas = std::min(filas, (fin - base) / losas * filas_por_franja);
+      }
+    }
+    if (filas != UINT32_MAX) {
+      const uint32_t limite = uint32_t(float(filas) * pase_escala_);
+      if (tijera.y >= limite) {
+        vacio = 2;
+      } else {
+        tijera.height = std::min(tijera.height, limite - tijera.y);
+      }
+    }
+  }
   if (vacio) {
     return true;  // empty viewport or scissor
   }
