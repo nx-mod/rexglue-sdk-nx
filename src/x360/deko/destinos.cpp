@@ -191,7 +191,7 @@ constexpr uint32_t kBytesLecturaRanura = 256u << 10;
 constexpr uint32_t kLadoSombras = 1600;
 constexpr uint64_t kSombraMinimoCiclos = 300;
 // GPU timestamps per work slot (16 bytes each in the core's report block) and the end-of-work category.
-constexpr uint32_t kMarcasPorRanura = 128;
+constexpr uint32_t kMarcasPorRanura = 1024;  // 3 slots x 1024 x 16 bytes = 48 KB of the 64 KB query block
 constexpr uint8_t kGpuFin = 0xFF;
 
 // With 4-byte texels, DesplazamientoMosaico2D(x, y, pitch, 2) is
