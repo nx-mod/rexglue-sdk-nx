@@ -103,6 +103,9 @@ struct ImagenDk {
   uint32_t alto_usado = 0;
   uint32_t alto_borrado = 0;
   bool banda_sucia = false;
+  // A 4x MSAA target (sample space, 2x2 samples a pixel) bound through its real 4x companion (deko_msaa_real): the
+  // pass draws there, and clears of the bound target use its rows halved.
+  bool ms_ligada = false;
 };
 
 // A texture the game reads from its memory, with what decides when to look at its bytes again.
@@ -267,7 +270,9 @@ class RenderDk final : public DestinosNativos {
   Resuelta* BandaDe(uint32_t& base, uint32_t ancho, uint32_t alto_destino, uint32_t pitch, bool profundidad,
                     uint32_t& filas);
   bool CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat formato, uint32_t ancho, uint32_t alto,
-                   uint32_t capas, uint32_t niveles, uint32_t flags, const char* que);
+                   uint32_t capas, uint32_t niveles, uint32_t flags, const char* que,
+                   DkMsMode muestras = DkMsMode_1x);
+  uint32_t VistaEstencil(const ImagenDk& imagen);  // a depth image's stencil, as a texture (usampler)
   void DestruirImagen(ImagenDk& imagen);
   // A new render target starts as the Vulkan path's: color 0, depth 1 and stencil 0.
   void PrepararDestino(ImagenDk& imagen);
@@ -440,6 +445,27 @@ class RenderDk final : public DestinosNativos {
     uint32_t usados = 0;     // dwords
     uint64_t trabajo = 0;    // the work that wrote them
   };
+  // ---- Real 4x MSAA (deko_msaa_real). A 4x surface's target lives in sample space (2x2 samples a pixel, the image
+  // at twice the pitch: what the EDRAM aliasing, the resolves and the tiles work on). Drawn there, every pixel shader
+  // ran once a sample; the Xenos shades once a pixel. A 4x pass now draws into a multisampled companion at pixel size
+  // (samples at the same 2x2 positions, so coverage and depth are as before): on entering, each target is cleared
+  // there (a pending clear) or packed from sample space; where the pass ends (TerminarPase: a copy, a clear, a
+  // restore, another pass), the companions are unpacked back.
+  ImagenDk* CompaneraMs(const ImagenDk& muestras);
+  void EmpaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas);
+  void DesempaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas);
+  void CerrarPaseMs();
+  void TerminarPase() {
+    EmitirCieloPendiente();  // the deferred sky draws in the pass, before its targets go back to sample space
+    CerrarPaseMs();
+  }
+  void DibujarRectanguloMs(bool destino_ms, bool profundidad, const DkShader& fs, uint32_t ranura, uint32_t ranura2,
+                           uint32_t ancho, uint32_t filas);
+  std::unordered_map<uint64_t, ImagenDk> ms_de_;  // by the sample-space image's serie
+  bool ms_activo_ = false;
+  DkShader fs_ms_color_{}, fs_ms_z_{}, fs_desms_color_{}, fs_desms_z_{};
+  bool fs_ms_validos_ = false;
+  uint64_t ms_empaquetados_ = 0, ms_desempaquetados_ = 0, ms_pases_ = 0;
   void ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad);
   void AplicarExportaciones(uint32_t ranura);
   DkMemBlock export_bloque_ = nullptr;

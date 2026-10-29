@@ -41,6 +41,10 @@ REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
                      "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of each kind, menu (under 1000 draws) "
                      "and game, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(deko_msaa_real, true, "deko3d",
+                    "4x MSAA passes drawn into real 4x images (pixel shaders once a pixel, as the Xenos) instead of "
+                    "straight into sample space (once a sample); the targets go back to sample space where the pass ends")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(deko_fotogramas_en_vuelo, 1, "deko3d",
                      "Frames the game may record ahead of the one the GPU finishes: each one more is a frame later to "
                      "the screen and no faster once the GPU is the limit. 0 = only the work slots limit it")
@@ -448,6 +452,46 @@ void main() {
 }
 )";
 
+// Real 4x MSAA (CompaneraMs): sample i of a pixel is texel (2x + (i & 1), 2y + (i >> 1)) of the sample-space image,
+// as the sample locations are set (DibujarRectanguloMs). Packing runs once a sample (gl_SampleID); depth carries its
+// stencil through the exported reference.
+constexpr const char* kFsMsColor = R"(#version 460
+layout(binding = 0) uniform sampler2D origen;
+layout(location = 0) out vec4 salida;
+void main() {
+  salida = texelFetch(origen, ivec2(gl_FragCoord.xy) * 2 + ivec2(gl_SampleID & 1, gl_SampleID >> 1), 0);
+}
+)";
+constexpr const char* kFsMsZ = R"(#version 460
+#extension GL_ARB_shader_stencil_export : require
+layout(binding = 0) uniform sampler2D profundidad;
+layout(binding = 1) uniform usampler2D estencil;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy) * 2 + ivec2(gl_SampleID & 1, gl_SampleID >> 1);
+  gl_FragDepth = texelFetch(profundidad, p, 0).r;
+  gl_FragStencilRefARB = int(texelFetch(estencil, p, 0).r);
+}
+)";
+constexpr const char* kFsDesmsColor = R"(#version 460
+layout(binding = 0) uniform sampler2DMS origen;
+layout(location = 0) out vec4 salida;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  salida = texelFetch(origen, p >> 1, (p.x & 1) | ((p.y & 1) << 1));
+}
+)";
+constexpr const char* kFsDesmsZ = R"(#version 460
+#extension GL_ARB_shader_stencil_export : require
+layout(binding = 0) uniform sampler2DMS profundidad;
+layout(binding = 1) uniform usampler2DMS estencil;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int m = (p.x & 1) | ((p.y & 1) << 1);
+  gl_FragDepth = texelFetch(profundidad, p >> 1, m).r;
+  gl_FragStencilRefARB = int(texelFetch(estencil, p >> 1, m).r);
+}
+)";
+
 constexpr uint32_t kRampaExacta = 1, kRampaGraduacion = 2, kRampaFxaa = 4;
 constexpr uint32_t kBytesUboRampa = 4 * 16;  // mezcla, efectos, desplazamiento, inverso (the ramp is a texture)
 
@@ -624,7 +668,7 @@ void RenderDk::CerrarTrabajo() {
   if (!nucleo_.TrabajoAbierto()) {
     return;
   }
-  EmitirCieloPendiente();  // the deferred sky belongs to this work's pass
+  TerminarPase();  // the deferred sky belongs to this work's pass
   // The fence is released by the 3D engine: a transfer still running on the copy engine is waited for first (the
   // read-backs are read when the fence has passed).
   if (transferencia_sin_barrera_) {
@@ -747,7 +791,7 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
     return false;
   }
   AsegurarTrabajo();
-  EmitirCieloPendiente();  // the copy binds other targets
+  TerminarPase();  // the copy binds other targets
   const deko::Subida ubo = Reservar(256, DK_UNIFORM_BUF_ALIGNMENT);
   if (!ubo) {
     return false;
@@ -864,7 +908,7 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
     }
   }
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   AntesDe3D();
   DkCmdBuf cmd = nucleo_.comandos();
   MarcarGpu(kGpuSubBorradoRapido);
@@ -1089,7 +1133,7 @@ void RenderDk::RestaurarEstencil(const ImagenDk& color, ImagenDk& profundidad, c
     return;
   }
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   HacerBorradoPendiente(profundidad);  // a pending clear first: the stencil written here must survive it
   const uint32_t ranura = VistaDe(color, 0x688, 0x688);
   DkCmdBuf cmd = nucleo_.comandos();
@@ -1166,7 +1210,7 @@ deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
 // ---- Images
 
 bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat formato, uint32_t ancho, uint32_t alto,
-                           uint32_t capas, uint32_t niveles, uint32_t flags, const char* que) {
+                           uint32_t capas, uint32_t niveles, uint32_t flags, const char* que, DkMsMode muestras) {
   if (!ancho || !alto || ancho > 16384 || alto > 16384) {
     REXLOG_WARN("[deko3d] {} de {}x{}: tamano imposible", que, ancho, alto);
     return false;
@@ -1180,6 +1224,7 @@ bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat for
   m.dimensions[1] = alto;
   m.dimensions[2] = tipo == DkImageType_Cubemap ? 6 : (tipo == DkImageType_3D ? capas : 1);
   m.mipLevels = std::max(niveles, 1u);
+  m.msMode = muestras;
   const bool comprimido = formato >= DkImageFormat_RGB_BC1 && formato <= DkImageFormat_RG_BC5_Snorm;
   deko::ArreglarTamanoDeTesela(m, comprimido ? (alto + 3) / 4 : alto);
   DkImageLayout disposicion;
@@ -1206,6 +1251,11 @@ void RenderDk::DestruirImagen(ImagenDk& imagen) {
   if (!imagen.viva) {
     return;
   }
+  if (const auto ms = ms_de_.find(imagen.serie); ms != ms_de_.end()) {
+    ImagenDk companera = ms->second;
+    ms_de_.erase(ms);
+    DestruirImagen(companera);
+  }
   LiberarDescriptoresDe(imagen.serie);
   nucleo_.LiberarImagenLuego(imagen.memoria);
   imagen = ImagenDk{};
@@ -1216,7 +1266,7 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
   MarcarGpu(kGpuSubPreparar);
   // The values as the game's clears write them: color 0, and depth 1.0 with stencil 0 as RB_DEPTH_CLEAR.
   borrado_previo_[imagen.serie] = {imagen.profundidad ? uint64_t(0xFFFFFF00u) : 0, dibujados_};
-  EmitirCieloPendiente();
+  TerminarPase();
   AntesDe3D();
   DkCmdBuf cmd = nucleo_.comandos();
   const DkImageView vista = VistaCompleta(imagen.imagen);
@@ -1579,7 +1629,7 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
 
 bool RenderDk::Copiar(const RegistrosCopia& reg) {
   AsegurarTrabajo();
-  EmitirCieloPendiente();  // a resolve reads the pass's target: the deferred sky goes in first
+  TerminarPase();  // a resolve reads the pass's target: the deferred sky goes in first
   const uint32_t control = reg.rb_copy_control;
   const uint32_t origen = control & 0x7;
   bool borrar_color = (control >> 8) & 0x1;
@@ -1852,7 +1902,7 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
   AntesDeCambiarDestino(&destino);
   destino.borrado_pendiente = false;
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   AntesDe3D();
   MarcarGpu(kGpuSubPendiente);
   const DkImageView vista = VistaCompleta(destino.imagen);
@@ -1878,7 +1928,9 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
     return;
   }
   DkCmdBuf cmd = nucleo_.comandos();
-  const DkScissor tijera = {0, desde, destino.ancho, hasta - desde};
+  // Bound through its 4x companion: the same rows there are half as many.
+  const DkScissor tijera = destino.ms_ligada ? DkScissor{0, desde / 2, destino.ancho / 2, (hasta + 1) / 2 - desde / 2}
+                                             : DkScissor{0, desde, destino.ancho, hasta - desde};
   dkCmdBufSetScissors(cmd, 0, &tijera, 1);  // clears respect the scissor (HowToDeko3d.md, section 6, item 9)
   if (destino.profundidad) {
     // The clear also sets the ZCULL data of the bound depth (deko3d).
@@ -1910,7 +1962,7 @@ void RenderDk::CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, ui
   }
   AntesDeCambiarDestino(&destino);
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   AntesDe3D();
   MarcarGpu(kGpuSubBanda);
   const DkImageView vista = VistaCompleta(destino.imagen);
@@ -1967,7 +2019,7 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
     return;
   }
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   if (!Copiar3D(it->second.imagen, 0, 0, destino.ancho, destino.alto, destino, 0, 0)) {
     MarcarGpu(kGpuCopias);
     AntesDeTransferir();
@@ -2041,7 +2093,7 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
     return;
   }
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   // What is resolved must be the target's real content: a swap may have taken it away, a clear may be pending, the
   // useful area grows to what is read.
   RestaurarContenido(*profundidad, true);
@@ -2537,6 +2589,20 @@ bool RenderDk::CrearShadersSalida() {
   if (!fs_estencil_valido_) {
     REXLOG_ERROR("[deko3d] no se pudo compilar la restauracion del estencil: {}", estencil.log);
   }
+  {
+    const deko::Compilador::Resultado c = compilador_.Compilar(false, kFsMsColor);
+    const deko::Compilador::Resultado z = compilador_.Compilar(false, kFsMsZ);
+    const deko::Compilador::Resultado dc = compilador_.Compilar(false, kFsDesmsColor);
+    const deko::Compilador::Resultado dz = compilador_.Compilar(false, kFsDesmsZ);
+    fs_ms_validos_ = c.ok && z.ok && dc.ok && dz.ok && nucleo_.CargarShader(fs_ms_color_, c.dksh, "4x: empaquetar color") &&
+                     nucleo_.CargarShader(fs_ms_z_, z.dksh, "4x: empaquetar profundidad") &&
+                     nucleo_.CargarShader(fs_desms_color_, dc.dksh, "4x: desempaquetar color") &&
+                     nucleo_.CargarShader(fs_desms_z_, dz.dksh, "4x: desempaquetar profundidad");
+    if (!fs_ms_validos_) {
+      REXLOG_WARN("[deko3d] 4x real no disponible ({} / {} / {} / {}): los pases 4x van en el espacio de muestras", c.log,
+                  z.log, dc.log, dz.log);
+    }
+  }
   const deko::Compilador::Resultado exportado = compilador_.Compilar(false, kFsEstencilExportado);
   fs_estencil_exportado_valido_ =
       exportado.ok && nucleo_.CargarShader(fs_estencil_exportado_, exportado.dksh, "estencil exportado desde color");
@@ -2578,7 +2644,7 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
 bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alto_salida, const ImagenDk& origen,
                             uint32_t ancho, uint32_t alto) {
   AsegurarTrabajo();
-  EmitirCieloPendiente();
+  TerminarPase();
   AntesDe3D();
   MarcarGpu(kGpuOtros);  // the output pass
   // The menu's post-processing, if it changed (an atomic counter; the cvars are only read then).
@@ -2851,6 +2917,175 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   return pintado;
 }
 
+// ---- Real 4x MSAA (rex/x360/deko/render.h)
+
+namespace {
+// The sample locations of a 4x pass: the 2x2 grid of the sample-space image, sample i at ((i & 1) + 0.5, (i >> 1) +
+// 0.5) / 2 of the pixel, so its coverage and depth are what drawing in sample space gave.
+DkMultisampleState EstadoMuestras(bool cuatro) {
+  DkMultisampleState m;
+  dkMultisampleStateDefaults(&m);
+  if (cuatro) {
+    m.mode = DkMsMode_4x;
+    m.rasterizerMode = DkMsMode_4x;
+    const DkSampleLocation sitios[4] = {{0.25f, 0.25f}, {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}};
+    dkMultisampleStateSetLocations(&m, sitios, 4);
+  }
+  return m;
+}
+}  // namespace
+
+uint32_t RenderDk::VistaEstencil(const ImagenDk& imagen) {
+  const uint64_t clave = (imagen.serie << 24) ^ 0xE57ull ^ (UINT64_C(1) << 62);
+  if (const auto it = vistas_.find(clave); it != vistas_.end()) {
+    return it->second;
+  }
+  const uint32_t ranura = ReservarDescriptorImagen();
+  if (!ranura) {
+    return 0;
+  }
+  DkImageView v;
+  dkImageViewDefaults(&v, &imagen.imagen);
+  v.dsSource = DkDsSource_Stencil;
+  EscribirDescriptorImagen(ranura, v);
+  vistas_.emplace(clave, ranura);
+  vistas_por_serie_[imagen.serie].push_back(clave);
+  return ranura;
+}
+
+ImagenDk* RenderDk::CompaneraMs(const ImagenDk& muestras) {
+  const uint32_t ancho = muestras.ancho / 2, alto = muestras.alto / 2;
+  auto it = ms_de_.find(muestras.serie);
+  if (it != ms_de_.end()) {
+    if (it->second.viva && it->second.ancho == ancho && it->second.alto == alto &&
+        it->second.formato == muestras.formato) {
+      return &it->second;
+    }
+    ImagenDk vieja = it->second;
+    ms_de_.erase(it);
+    DestruirImagen(vieja);
+  }
+  ImagenDk m;
+  uint32_t flags = DkImageFlags_UsageRender;
+  if (muestras.profundidad ? REXCVAR_GET(nfsmw_dk_compresion_profundidad) : REXCVAR_GET(nfsmw_dk_compresion_color)) {
+    flags |= DkImageFlags_HwCompression;
+  }
+  if (!CrearImagen(m, DkImageType_2DMS, muestras.formato, ancho, alto, 1, 1, flags, "companera 4x", DkMsMode_4x)) {
+    return nullptr;
+  }
+  REXLOG_INFO("[deko3d] companera 4x de {}x{} ({})", ancho, alto, muestras.profundidad ? "profundidad" : "color");
+  return &ms_de_.emplace(muestras.serie, m).first->second;
+}
+
+// A rectangle from (0, 0) over what is bound, with `fs` reading texture slots `ranura` (and `ranura2`, the stencil),
+// on a 4x target (destino_ms) or a sample-space one. Depth: written with its stencil (the replace op takes the
+// exported reference), color untouched.
+void RenderDk::DibujarRectanguloMs(bool destino_ms, bool profundidad, const DkShader& fs, uint32_t ranura,
+                                   uint32_t ranura2, uint32_t ancho, uint32_t filas) {
+  DkCmdBuf cmd = nucleo_.comandos();
+  const DkViewport vp = {0.0f, 0.0f, float(ancho), float(filas), 0.0f, 1.0f};
+  const DkScissor tijera = {0, 0, ancho, filas};
+  dkCmdBufSetViewports(cmd, 0, &vp, 1);
+  static const DkViewportSwizzle kIdentidad = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
+                                                DkSwizzle_PositiveW};
+  dkCmdBufSetViewportSwizzles(cmd, 0, &kIdentidad, 1);
+  dkCmdBufSetScissors(cmd, 0, &tijera, 1);
+  const DkMultisampleState muestras = EstadoMuestras(destino_ms);
+  dkCmdBufBindMultisampleState(cmd, &muestras);
+  DkRasterizerState rs;
+  dkRasterizerStateDefaults(&rs);
+  rs.cullMode = DkFace_None;
+  DkColorState cs;
+  dkColorStateDefaults(&cs);
+  DkColorWriteState cws;
+  dkColorWriteStateDefaults(&cws);
+  if (profundidad) {
+    cws.masks = 0;
+  }
+  DkDepthStencilState ds;
+  dkDepthStencilStateDefaults(&ds);  // stencil ops replace, compare always
+  ds.depthTestEnable = profundidad;
+  ds.depthWriteEnable = profundidad;
+  ds.depthCompareOp = DkCompareOp_Always;
+  ds.stencilTestEnable = profundidad;
+  dkCmdBufBindRasterizerState(cmd, &rs);
+  dkCmdBufBindColorState(cmd, &cs);
+  dkCmdBufBindColorWriteState(cmd, &cws);
+  dkCmdBufBindDepthStencilState(cmd, &ds);
+  if (profundidad) {
+    dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, 0xFF, 0x00, 0xFF);
+  }
+  dkCmdBufBindVtxAttribState(cmd, nullptr, 0);
+  dkCmdBufBindVtxBufferState(cmd, nullptr, 0);
+  const DkShader* shaders[2] = {&vs_salida_, &fs};
+  dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
+  const DkResHandle texturas[2] = {dkMakeTextureHandle(ranura, 0), dkMakeTextureHandle(ranura2, 0)};
+  dkCmdBufBindTextures(cmd, DkStage_Fragment, 0, texturas, profundidad ? 2 : 1);
+  dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
+  invalidar_zcull_ |= profundidad;
+  rop_sin_barrera_ = true;
+  OlvidarEstado();
+}
+
+void RenderDk::EmpaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas) {
+  AsegurarTrabajo();
+  AntesDe3D();
+  DkCmdBuf cmd = nucleo_.comandos();
+  dkCmdBufBarrier(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);  // what was drawn or copied there, to read
+  ++barreras_fragmentos_;
+  DkImageView vista;
+  dkImageViewDefaults(&vista, &ms.imagen);
+  if (muestras.profundidad) {
+    dkCmdBufBindRenderTargets(cmd, nullptr, 0, &vista);
+  } else {
+    dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
+  }
+  const uint32_t ranura = VistaDe(muestras, 0x688, muestras.profundidad ? 0 : 0x688);
+  const uint32_t ranura2 = muestras.profundidad ? VistaEstencil(muestras) : 0;
+  DibujarRectanguloMs(true, muestras.profundidad, muestras.profundidad ? fs_ms_z_ : fs_ms_color_, ranura, ranura2,
+                      ms.ancho, std::min(ms.alto, (filas + 1) / 2));
+  ++ms_empaquetados_;
+}
+
+void RenderDk::DesempaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas) {
+  AsegurarTrabajo();
+  AntesDe3D();
+  DkCmdBuf cmd = nucleo_.comandos();
+  dkCmdBufBarrier(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);  // the pass's draws, to read
+  ++barreras_fragmentos_;
+  DkImageView vista;
+  dkImageViewDefaults(&vista, &muestras.imagen);
+  if (muestras.profundidad) {
+    dkCmdBufBindRenderTargets(cmd, nullptr, 0, &vista);
+  } else {
+    dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
+  }
+  const uint32_t ranura = VistaDe(ms, 0x688, ms.profundidad ? 0 : 0x688);
+  const uint32_t ranura2 = ms.profundidad ? VistaEstencil(ms) : 0;
+  DibujarRectanguloMs(false, muestras.profundidad, muestras.profundidad ? fs_desms_z_ : fs_desms_color_, ranura,
+                      ranura2, muestras.ancho, std::min(muestras.alto, filas));
+  ++ms_desempaquetados_;
+}
+
+void RenderDk::CerrarPaseMs() {
+  if (!ms_activo_) {
+    return;
+  }
+  ms_activo_ = false;
+  for (ImagenDk* imagen : imagenes_pase_) {
+    if (imagen && imagen->ms_ligada) {
+      imagen->ms_ligada = false;
+      if (ImagenDk* ms = CompaneraMs(*imagen)) {
+        DesempaquetarMs(*imagen, *ms, imagen->alto_usado ? imagen->alto_usado : imagen->alto);
+      }
+    }
+  }
+  const DkMultisampleState uno = EstadoMuestras(false);
+  dkCmdBufBindMultisampleState(nucleo_.comandos(), &uno);
+  g_.pase_valido = false;  // the next draw binds its targets again (and packs them if it is 4x)
+  OlvidarEstado();
+}
+
 // ---- Memory export (rex/x360/deko/render.h)
 
 namespace {
@@ -3074,6 +3309,8 @@ void RenderDk::InformePeriodico() {
       "[deko3d] por fotograma, borrados por tipo: al empezar un pase {:.2f} ms, rapidos de D3D {:.2f}, estencil "
       "restaurado {:.2f}, destinos nuevos {:.2f}, pendientes {:.2f}, bandas {:.2f}",
       ms_borrado(0), ms_borrado(1), ms_borrado(2), ms_borrado(3), ms_borrado(4), ms_borrado(5));
+  X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados en total", ms_pases_, ms_empaquetados_,
+               ms_desempaquetados_);
   X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
                "sus flujos; {} registros en total, {} veces sin sitio",
                double(export_dibujos_ - informe_export_dibujos_) / fotogramas,

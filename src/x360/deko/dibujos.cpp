@@ -100,6 +100,7 @@ REXCVAR_DECLARE(bool, nfsmw_sombras_sin_vegetacion);
 REXCVAR_DECLARE(bool, nfsmw_dk_perfil_barrera);
 REXCVAR_DECLARE(bool, nfsmw_dk_perfil_variantes);
 REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
+REXCVAR_DECLARE(bool, deko_msaa_real);
 // deko3d only.
 REXCVAR_DEFINE_BOOL(deko_diagnostico_magenta, false, "deko3d",
                     "Testing: every pixel shader writes opaque magenta to all its outputs, to see where the geometry "
@@ -717,7 +718,7 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
 // ---- Render targets of a draw. Nothing to close or open: binding others is all a pass change costs.
 
 bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
-  EmitirCieloPendiente();  // the deferred sky belongs to the pass that ends here
+  TerminarPase();  // the deferred sky belongs to the pass that ends here
   std::array<ImagenDk*, 5> imagenes{};
   for (uint32_t i = 0; i < 4; ++i) {
     if (claves[i]) {
@@ -744,6 +745,29 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
       }
     }
   }
+  // Real 4x MSAA (CompaneraMs): a 4x pass draws into the companions, each packed from sample space first unless a
+  // pending clear will cover it (done right after binding, on the companion).
+  static const bool msaa_real = REXCVAR_GET(deko_msaa_real);
+  std::array<ImagenDk*, 5> ms{};
+  bool pase_ms = false;
+  if (msaa_real && fs_ms_validos_) {
+    for (uint32_t i = 0; i < 5; ++i) {
+      pase_ms |= claves[i] && ((claves[i] >> 20) & 0x3) == 2;
+    }
+    for (uint32_t i = 0; i < 5 && pase_ms; ++i) {
+      if (imagenes[i] && !(ms[i] = CompaneraMs(*imagenes[i]))) {
+        pase_ms = false;
+      }
+    }
+    if (pase_ms) {
+      for (uint32_t i = 0; i < 5; ++i) {
+        if (imagenes[i] && !imagenes[i]->borrado_pendiente) {
+          EmpaquetarMs(*imagenes[i], *ms[i], imagenes[i]->alto_usado ? imagenes[i]->alto_usado : imagenes[i]->alto);
+        }
+      }
+      ++ms_pases_;
+    }
+  }
   ++pase_numero_;
   AntesDe3D();
   // Creating a target records its first clear and forgets the emitted state: the binding comes after.
@@ -763,7 +787,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
       }
     }
     if (imagenes[i]) {
-      dkImageViewDefaults(&vistas[n], &imagenes[i]->imagen);
+      dkImageViewDefaults(&vistas[n], &(pase_ms ? ms[i] : imagenes[i])->imagen);
       // k_8_8_8_8_GAMMA: the Xenos writes it gamma-encoded, and a resolve as 8_8_8_8 copies those bytes on (Halo 3's
       // whole frame). Drawn through the image's sRGB view, so the GPU encodes the same way.
       if (((claves[i] >> 16) & 0xF) == 1 && imagenes[i]->formato == DkImageFormat_RGBA8_Unorm) {
@@ -772,15 +796,17 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
       imagenes[i]->formato_dibujo = uint8_t((claves[i] >> 16) & 0xF);
       colores[n] = &vistas[n];
       ++n;
-      ancho = std::min(ancho, imagenes[i]->ancho);
-      alto = std::min(alto, imagenes[i]->alto);
+      ancho = std::min(ancho, (pase_ms ? ms[i] : imagenes[i])->ancho);
+      alto = std::min(alto, (pase_ms ? ms[i] : imagenes[i])->alto);
+      imagenes[i]->ms_ligada = pase_ms;
     }
   }
   DkImageView vista_z;
   if (imagenes[4]) {
-    dkImageViewDefaults(&vista_z, &imagenes[4]->imagen);
-    ancho = std::min(ancho, imagenes[4]->ancho);
-    alto = std::min(alto, imagenes[4]->alto);
+    dkImageViewDefaults(&vista_z, &(pase_ms ? ms[4] : imagenes[4])->imagen);
+    ancho = std::min(ancho, (pase_ms ? ms[4] : imagenes[4])->ancho);
+    alto = std::min(alto, (pase_ms ? ms[4] : imagenes[4])->alto);
+    imagenes[4]->ms_ligada = pase_ms;
   }
   const uint32_t categoria = CategoriaDeDestino(pitch, claves);  // GPU time by pass type (the C2 report)
   categoria_pase_ = categoria;
@@ -788,6 +814,16 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   MarcarGpu(borrar_z ? kGpuSubBorradoPase : categoria);
   DkCmdBuf cmd = nucleo_.comandos();
   dkCmdBufBindRenderTargets(cmd, colores, n, imagenes[4] ? &vista_z : nullptr);
+  if (pase_ms) {
+    DkMultisampleState cuatro;
+    dkMultisampleStateDefaults(&cuatro);
+    cuatro.mode = DkMsMode_4x;
+    cuatro.rasterizerMode = DkMsMode_4x;
+    const DkSampleLocation sitios[4] = {{0.25f, 0.25f}, {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}};
+    dkMultisampleStateSetLocations(&cuatro, sitios, 4);  // as DibujarRectanguloMs packs them
+    dkCmdBufBindMultisampleState(cmd, &cuatro);
+  }
+  ms_activo_ = pase_ms;
   // The clears the game asked for when it resolved, done now that the targets are bound (nfsmw_dk_borrado_z_aplazado,
   // nfsmw_dk_borrado_color_aplazado): the depth's ZCULL data starts the pass valid. Only the useful area.
   bool borrado = false;
@@ -833,7 +869,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   g_.pase_serie = serie_imagenes_;
   // A 4x MSAA surface (Dibujar): 2x2 samples a pixel.
   pase_escala_ = 1.0f;
-  for (uint32_t i = 0; i < 5; ++i) {
+  for (uint32_t i = 0; i < 5 && !pase_ms; ++i) {  // in the companions the pass is at pixel scale
     if (claves[i] && ((claves[i] >> 20) & 0x3) == 2) {
       pase_escala_ = 2.0f;
     }
@@ -1872,7 +1908,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // The useful area of the bound targets: nothing is drawn below the scissor. If this draw reaches rows the last
   // clear of a target left as they were, they are cleared first (nfsmw_dk_borrar_area_util).
   if (!solo_exportar) {
-    const uint32_t hasta = tijera.y + tijera.height;
+    const uint32_t hasta = (tijera.y + tijera.height) * (ms_activo_ ? 2 : 1);  // rows of the sample-space image
     for (uint32_t i = 0, indice = 0; i < 4; ++i) {
       if (ImagenDk* imagen = imagenes_pase_[i]) {
         CompletarBanda(*imagen, hasta, true, indice++);
@@ -1885,7 +1921,8 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // The EDRAM tiles this draw writes are its targets' now (TraerBaldosas): marked again only when the pass or the
   // rows its scissor covers grow.
   if (!solo_exportar) {
-    const uint32_t desde = tijera.y, hasta = tijera.y + tijera.height;
+    const uint32_t por = ms_activo_ ? 2 : 1;  // rows of the sample-space image
+    const uint32_t desde = tijera.y * por, hasta = (tijera.y + tijera.height) * por;
     if (marcado_serie_ != pase_numero_ || desde < marcado_desde_ || hasta > marcado_hasta_) {
       if (marcado_serie_ != pase_numero_) {
         marcado_desde_ = desde;
@@ -2621,7 +2658,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       uint32_t((claves[0] >> 24) & 0xFFF) == (r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF) && imagenes_pase_[0]) {
     const uint32_t info_z = r[gr::XE_GPU_REG_RB_DEPTH_INFO];
     if (ImagenDk* z = DestinoProfundidad(info_z & 0xFFF, (info_z >> 16) & 0x1, pitch)) {
-      RestaurarEstencil(*imagenes_pase_[0], *z, tijera);
+      DkScissor rect = tijera;
+      if (ms_activo_) {  // the restore works in sample space (it ends the pass first)
+        rect = {rect.x * 2, rect.y * 2, rect.width * 2, rect.height * 2};
+      }
+      RestaurarEstencil(*imagenes_pase_[0], *z, rect);
     }
   }
   ++dibujados_;
