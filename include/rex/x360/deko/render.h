@@ -519,6 +519,11 @@ class RenderDk final : public DestinosNativos {
   std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp
   uint64_t gpu_ns_ = 0, gpu_trabajos_ = 0;
   std::array<uint64_t, kGpuCategorias> gpu_categorias_ns_{};
+  // The clears by kind (kGpuSub*), inside gpu_categorias_ns_[kGpuBorrados]: at a pass's start, D3D fast clears,
+  // stencil restores, new targets, pending clears and bands.
+  static constexpr uint32_t kGpuSubBorradoPase = 32, kGpuSubBorradoRapido = 33, kGpuSubEstencil = 34,
+                            kGpuSubPreparar = 35, kGpuSubPendiente = 36, kGpuSubBanda = 37, kGpuSubBorrados = 6;
+  std::array<uint64_t, kGpuSubBorrados> gpu_sub_borrados_ns_{}, informe_sub_borrados_{};
   uint64_t marca_fin_previa_ = 0;  // raw end timestamp of the last work read
   // nfsmw_nativo_saltar_borrados_repetidos: per image (its serie), the last clear value while nothing has been
   // drawn since (the global draw count then).

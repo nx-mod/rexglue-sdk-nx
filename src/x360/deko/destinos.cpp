@@ -577,6 +577,11 @@ void RenderDk::LeerMarcasGpu(uint32_t ranura) {
     const uint64_t t = marca(i);
     if (t >= previa && m[i - 1] < kGpuCategorias) {
       gpu_categorias_ns_[m[i - 1]] += uint64_t(double(t - previa) * deko::kNsPorUnidadGpu);
+    } else if (t >= previa && m[i - 1] >= kGpuSubBorradoPase && m[i - 1] < kGpuSubBorradoPase + kGpuSubBorrados) {
+      // A kind of clear: counted in the clears and on its own (the report's clear line).
+      const uint64_t ns = uint64_t(double(t - previa) * deko::kNsPorUnidadGpu);
+      gpu_categorias_ns_[kGpuBorrados] += ns;
+      gpu_sub_borrados_ns_[m[i - 1] - kGpuSubBorradoPase] += ns;
     }
     previa = t;
   }
@@ -772,7 +777,7 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
   EmitirCieloPendiente();
   AntesDe3D();
   DkCmdBuf cmd = nucleo_.comandos();
-  MarcarGpu(kGpuBorrados);
+  MarcarGpu(kGpuSubBorradoRapido);
   for (uint32_t i = 0; i < n; ++i) {
     ImagenDk& imagen = *imagenes[i];
     HacerBorradoPendiente(imagen);
@@ -998,7 +1003,7 @@ void RenderDk::RestaurarEstencil(const ImagenDk& color, ImagenDk& profundidad, c
   HacerBorradoPendiente(profundidad);  // a pending clear first: the stencil written here must survive it
   const uint32_t ranura = VistaDe(color, 0x688, 0x688);
   DkCmdBuf cmd = nucleo_.comandos();
-  MarcarGpu(kGpuBorrados);
+  MarcarGpu(kGpuSubEstencil);
   // The colour was just drawn: its writes must reach the texture units.
   dkCmdBufBarrier(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image);
   ++barreras_fragmentos_;
@@ -1113,7 +1118,7 @@ void RenderDk::DestruirImagen(ImagenDk& imagen) {
 
 void RenderDk::PrepararDestino(ImagenDk& imagen) {
   AsegurarTrabajo();
-  MarcarGpu(kGpuBorrados);
+  MarcarGpu(kGpuSubPreparar);
   // The values as the game's clears write them: color 0, and depth 1.0 with stencil 0 as RB_DEPTH_CLEAR.
   borrado_previo_[imagen.serie] = {imagen.profundidad ? uint64_t(0xFFFFFF00u) : 0, dibujados_};
   EmitirCieloPendiente();
@@ -1754,7 +1759,7 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
   AsegurarTrabajo();
   EmitirCieloPendiente();
   AntesDe3D();
-  MarcarGpu(kGpuBorrados);
+  MarcarGpu(kGpuSubPendiente);
   const DkImageView vista = VistaCompleta(destino.imagen);
   if (destino.profundidad) {
     dkCmdBufBindRenderTargets(nucleo_.comandos(), nullptr, 0, &vista);
@@ -1812,7 +1817,7 @@ void RenderDk::CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, ui
   AsegurarTrabajo();
   EmitirCieloPendiente();
   AntesDe3D();
-  MarcarGpu(kGpuBorrados);
+  MarcarGpu(kGpuSubBanda);
   const DkImageView vista = VistaCompleta(destino.imagen);
   if (destino.profundidad) {
     dkCmdBufBindRenderTargets(nucleo_.comandos(), nullptr, 0, &vista);
@@ -2792,6 +2797,7 @@ void RenderDk::InformePeriodico() {
     informe_saltados_ = borrados_saltados_;
     informe_z_temprana_ = dibujos_z_temprana_;
     informe_categorias_ = gpu_categorias_ns_;
+    informe_sub_borrados_ = gpu_sub_borrados_ns_;
     informe_etapas_ = ns_etapas_;
     informe_dedupe_bytes_ = dedupe_.bytes_ahorrados();
     informe_intercambios_ = intercambios_;
@@ -2851,6 +2857,13 @@ void RenderDk::InformePeriodico() {
       double(nucleo_.NsEsperandoValla() - informe_espera_ns_) / 1e6 / fotogramas,
       double(borrados_saltados_ - informe_saltados_) / fotogramas,
       double(dibujos_z_temprana_ - informe_z_temprana_) / fotogramas);
+  const auto ms_borrado = [&](uint32_t k) {
+    return double(gpu_sub_borrados_ns_[k] - informe_sub_borrados_[k]) / 1e6 / fotogramas;
+  };
+  X360_INFORME(
+      "[deko3d] por fotograma, borrados por tipo: al empezar un pase {:.2f} ms, rapidos de D3D {:.2f}, estencil "
+      "restaurado {:.2f}, destinos nuevos {:.2f}, pendientes {:.2f}, bandas {:.2f}",
+      ms_borrado(0), ms_borrado(1), ms_borrado(2), ms_borrado(3), ms_borrado(4), ms_borrado(5));
   const auto us = [&](uint32_t e) { return dibujos ? double(ns_etapas_[e] - informe_etapas_[e]) / double(dibujos) / 1e3 : 0.0; };
   static constexpr const char* kFasesSm[3] = {"mirando", "APLICANDO", "apagada"};
   X360_INFORME(

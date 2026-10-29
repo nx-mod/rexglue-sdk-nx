@@ -785,7 +785,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   const uint32_t categoria = CategoriaDeDestino(pitch, claves);  // GPU time by pass type (the C2 report)
   categoria_pase_ = categoria;
   const bool borrar_z = imagenes[4] && imagenes[4]->borrado_pendiente;
-  MarcarGpu(borrar_z ? kGpuBorrados : categoria);
+  MarcarGpu(borrar_z ? kGpuSubBorradoPase : categoria);
   DkCmdBuf cmd = nucleo_.comandos();
   dkCmdBufBindRenderTargets(cmd, colores, n, imagenes[4] ? &vista_z : nullptr);
   // The clears the game asked for when it resolved, done now that the targets are bound (nfsmw_dk_borrado_z_aplazado,
@@ -795,7 +795,7 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
     if (imagenes[i]) {
       if (imagenes[i]->borrado_pendiente) {
         if (!borrado && !borrar_z) {
-          MarcarGpu(kGpuBorrados);
+          MarcarGpu(kGpuSubBorradoPase);
         }
         imagenes[i]->borrado_pendiente = false;
         BorrarFilas(*imagenes[i], indice, 0, AltoDeBorrado(*imagenes[i]));
