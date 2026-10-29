@@ -751,8 +751,10 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
   std::array<ImagenDk*, 5> ms{};
   bool pase_ms = false;
   if (msaa_real && fs_ms_validos_) {
+    // Only the large ones (Halo 3's menu G-buffer, 2320 samples wide): where shading every sample cost the most. The
+    // small 4x passes of the game (effects, 280-600 pixels) stay in sample space.
     for (uint32_t i = 0; i < 5; ++i) {
-      pase_ms |= claves[i] && ((claves[i] >> 20) & 0x3) == 2;
+      pase_ms |= claves[i] && ((claves[i] >> 20) & 0x3) == 2 && (claves[i] & 0xFFFF) >= 1600;
     }
     for (uint32_t i = 0; i < 5 && pase_ms; ++i) {
       if (imagenes[i] && !(ms[i] = CompaneraMs(*imagenes[i]))) {

@@ -449,6 +449,12 @@ uint32_t Nucleo::SubidaLibre() const {
   return usada < rebanada ? rebanada - usada : 0;
 }
 
+DkMemBlock Nucleo::CrearBloqueLecturaCacheado(uint32_t bytes, const char* nombre) {
+  DkMemBlock b = CrearBloque(bytes, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached, nombre);
+  bloques_lectura_.push_back(b);
+  return b;
+}
+
 DkMemBlock Nucleo::CrearBloqueLectura(uint32_t bytes, const char* nombre) {
   DkMemBlock b = CrearBloque(bytes, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuUncached, nombre);
   bloques_lectura_.push_back(b);

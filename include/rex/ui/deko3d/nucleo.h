@@ -194,6 +194,9 @@ class Nucleo {
   // GPU memory the CPU reads back (CPU-cached, GPU-uncached): flush its CPU cache (dkMemBlockFlushCpuCache)
   // before the GPU writes it and again before reading. Its own block: few and small (HowToDeko3d.md, 5.7).
   DkMemBlock CrearBloqueLectura(uint32_t bytes, const char* nombre);
+  // The same, cached for the GPU too: what the GPU writes reaches memory at the work's fence (it flushes its caches),
+  // and what the CPU writes there must go through the command list (dkCmdBufPushData), not the CPU.
+  DkMemBlock CrearBloqueLecturaCacheado(uint32_t bytes, const char* nombre);
 
   // Copies a DKSH's code into code memory and initializes `shader` from it. false (logged) if it does not fit or
   // is not a DKSH. Sets codigo_nuevo(): code copied in the middle of a frame is only seen by the GPU after the

@@ -41,6 +41,10 @@ REXCVAR_DEFINE_INT32(deko_volcar_pasos, 0, "deko3d",
                      "Diagnostic: how many capture frames (nfsmw_captura_cada_s) of each kind, menu (under 1000 draws) "
                      "and game, get every resolve written shrunk to 288x160 as capturas/paso_*.ppm; 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(deko_exportacion_memoria, true, "deko3d",
+                    "Memory export (Halo 3's particles, light visibility tests, water): the vertex shaders' writes to "
+                    "memory reach guest memory. false = dropped, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(deko_msaa_real, true, "deko3d",
                     "4x MSAA passes drawn into real 4x images (pixel shaders once a pixel, as the Xenos) instead of "
                     "straight into sample space (once a sample); the targets go back to sample space where the pass ends")
@@ -397,7 +401,17 @@ float de7e3(uint f) {
   return uintBitsToFloat((uint(e + 124) << 23) | (m << 16));
 }
 void main() {
-  vec4 v = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 v;
+  if (copia.desplazamiento.z > 1) {
+    // A 4x MSAA resolve: the pixel's 2x2 samples averaged (xy: the source's sample-space origin, w: the destination's
+    // origin, x in the low 16 bits).
+    ivec2 s = (p - ivec2(copia.desplazamiento.w & 0xFFFF, copia.desplazamiento.w >> 16)) * 2 + copia.desplazamiento.xy;
+    v = (texelFetch(origen, s, 0) + texelFetch(origen, s + ivec2(1, 0), 0) + texelFetch(origen, s + ivec2(0, 1), 0) +
+         texelFetch(origen, s + ivec2(1, 1), 0)) * 0.25;
+  } else {
+    v = texelFetch(origen, p + copia.desplazamiento.xy, 0);
+  }
   if (copia.modo.x == 2) {
     uvec3 b = uvec3(round(clamp(v.rgb, 0.0, 1.0) * 1023.0));
     v = vec4(de7e3(b.r), de7e3(b.g), de7e3(b.b), v.a);
@@ -516,7 +530,12 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   lecturas_.resize(kRanuras);
   marcas_.resize(kRanuras);
   lectura_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kBytesLecturaRanura, "lecturas de vuelta (por ranura)");
-  export_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kDwordsExportRanura * 4, "registros de exportacion a memoria");
+  // GPU-cached: atomics and stores in uncached memory went to DRAM one by one (Halo 3's particle updates, 20 ms a
+  // frame). The fence flushes them; the region's counter is zeroed through the command list.
+  export_bloque_ = REXCVAR_GET(deko_exportacion_memoria)
+                       ? nucleo_.CrearBloqueLecturaCacheado(kRanuras * kDwordsExportRanura * 4,
+                                                            "registros de exportacion a memoria")
+                       : nullptr;
   if (export_bloque_) {
     export_cpu_ = static_cast<uint32_t*>(dkMemBlockGetCpuAddr(export_bloque_));
     export_gpu_ = dkMemBlockGetGpuAddr(export_bloque_);
@@ -798,7 +817,11 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   if (!ubo) {
     return false;
   }
-  const int32_t desplazamiento[4] = {int32_t(x0) - int32_t(dx), int32_t(y0) - int32_t(dy), int32_t(muestras), 0};
+  // Color from a 4x surface (muestras > 1) averages each pixel's samples: the shader takes both origins.
+  const bool promedio = !z && muestras > 1;
+  const int32_t desplazamiento[4] = {promedio ? int32_t(x0) : int32_t(x0) - int32_t(dx),
+                                     promedio ? int32_t(y0) : int32_t(y0) - int32_t(dy), int32_t(muestras),
+                                     promedio ? int32_t(dx | (dy << 16)) : 0};
   const int32_t modos[4] = {modo, 0, 0, 0};
   const float escalas[4] = {escala, 0.0f, 0.0f, 0.0f};
   std::memcpy(ubo.cpu, desplazamiento, sizeof(desplazamiento));
@@ -1775,13 +1798,18 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
                                : 0;
         if (w && h) {
           destino_render->alto_usado = std::max(destino_render->alto_usado, fy0 + h * muestras);
-          MarcarGpu(kGpuCopias);
-          AntesDeTransferir();
-          const DkImageView origen_vista = VistaCompleta(destino_render->imagen);
-          const DkImageView destino_vista = VistaCompleta(resuelta->imagen.imagen);
-          const DkImageRect a = {fx0, fy0, 0, w * muestras, h * muestras, 1};
-          const DkImageRect b = {dx, dy, 0, w, h, 1};
-          dkCmdBufBlitImage(cmd, &origen_vista, &a, &destino_vista, &b, DkBlitFlag_FilterLinear, 0);
+          // On the 3D engine (a fragment barrier, not the copy engine's full one: 8 of them a menu frame), with the
+          // copy's 7e3 handling and exponent bias as any other resolve. The linear blit only if that cannot be done.
+          if (!Copiar3D(*destino_render, fx0, fy0, w, h, resuelta->imagen, dx, dy, modo_copia, escala, muestras)) {
+            MarcarGpu(kGpuCopias);
+            AntesDeTransferir();
+            const DkImageView origen_vista = VistaCompleta(destino_render->imagen);
+            const DkImageView destino_vista = VistaCompleta(resuelta->imagen.imagen);
+            const DkImageRect a = {fx0, fy0, 0, w * muestras, h * muestras, 1};
+            const DkImageRect b = {dx, dy, 0, w, h, 1};
+            dkCmdBufBlitImage(cmd, &origen_vista, &a, &destino_vista, &b, DkBlitFlag_FilterLinear, 0);
+            cmd = nucleo_.comandos();
+          }
           resuelta->escrita = true;
           ++resuelta->imagen.version;
           SombraMinimoResueltaEscrita(base_resuelta);
@@ -3171,10 +3199,10 @@ void RenderDk::ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_
     return;
   }
   region.dword = er.usados;
-  uint32_t* cabecera = export_cpu_ + (trabajo_ % kRanuras) * kDwordsExportRanura + region.dword;
-  cabecera[0] = 0;
-  dkMemBlockFlushCpuCache(export_bloque_, uint32_t(reinterpret_cast<uint8_t*>(cabecera) -
-                                                   reinterpret_cast<uint8_t*>(export_cpu_)), 8);
+  static constexpr uint32_t kCero[2] = {0, 0};
+  dkCmdBufPushData(nucleo_.comandos(),
+                   export_gpu_ + (uint64_t(trabajo_ % kRanuras) * kDwordsExportRanura + region.dword) * 4, kCero,
+                   sizeof(kCero));
   er.usados += 2 + region.capacidad * 2;
   dword = region.dword;
   capacidad = region.capacidad;
