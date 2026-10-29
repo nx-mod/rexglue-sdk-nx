@@ -420,8 +420,34 @@ class RenderDk final : public DestinosNativos {
     // What each buffer reads per vertex (GlslDeko's zancada_vf / minimo_vf / maximo_vf); stride 0 = the whole buffer.
     std::array<uint32_t, 16> zancada_vf{};
     std::array<int32_t, 16> minimo_vf{}, maximo_vf{};
+    bool exporta = false;  // a vertex shader that writes memory (memory export)
   };
   InfoShader& InfoDe(const EntradaShader& entrada);
+
+  // ---- Memory export (Halo 3's particles, light visibility tests, water). A draw whose vertex shader exports gets a
+  // region of its work slot's record buffer (binding 15, the shader's xeno_memexport): (guest byte address, dword) pairs.
+  // When the GPU has done that work the records are written to guest memory, those inside the streams found in the
+  // draw's constants only (the shader's checks aside, nothing else of guest memory can be hit).
+  static constexpr uint32_t kDwordsExportRanura = 1u << 20;  // 4 MB a slot
+  static constexpr uint32_t kFlujosExport = 8;
+  struct RegionExport {
+    uint32_t dword = 0, capacidad = 0;
+    uint32_t n_flujos = 0;
+    std::array<std::pair<uint32_t, uint32_t>, kFlujosExport> flujos{};  // guest byte address, bytes
+  };
+  struct ExportRanura {
+    std::vector<RegionExport> regiones;
+    uint32_t usados = 0;     // dwords
+    uint64_t trabajo = 0;    // the work that wrote them
+  };
+  void ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad);
+  void AplicarExportaciones(uint32_t ranura);
+  DkMemBlock export_bloque_ = nullptr;
+  uint32_t* export_cpu_ = nullptr;
+  DkGpuAddr export_gpu_ = 0;
+  std::array<ExportRanura, 3> export_ranuras_{};
+  uint64_t export_dibujos_ = 0, export_registros_ = 0, export_escritos_ = 0, export_fuera_ = 0, export_llenos_ = 0;
+  uint64_t informe_export_dibujos_ = 0, informe_export_escritos_ = 0, informe_export_fuera_ = 0;
   void RecogerCompilaciones();
 
   // ---- Textures, samplers and descriptors (nfsmw_dk_texturas.cpp)

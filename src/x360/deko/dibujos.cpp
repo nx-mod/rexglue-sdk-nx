@@ -973,6 +973,7 @@ RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
       info.zancada_vf = g.zancada_vf;
       info.minimo_vf = g.minimo_vf;
       info.maximo_vf = g.maximo_vf;
+      info.exporta = entrada.vertices && entrada.glsl.find("xeEscritos |=") != std::string::npos;
       info.interpoladores_listos = true;
     }
     return info;
@@ -1286,6 +1287,8 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
   const bool sin_recorte = (r[gr::XE_GPU_REG_PA_CL_CLIP_CNTL] >> 16) & 0x1;
   const uint32_t modo_sc = r[gr::XE_GPU_REG_PA_SU_SC_MODE_CNTL];
+  // A vertex shader that writes memory (memory export: Halo 3's particles): drawn even when it paints nothing.
+  const bool exporta = InfoDe(*p.vs).exporta && export_bloque_;
   if (((modo_sc >> 3) & 0x3) == 2 && ((modo_sc >> 5) & 0x7) != 2) {
     return Rechazar(4, "poligonos dibujados como puntos o lineas");
   }
@@ -1342,7 +1345,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       const bool deja_rastro =
           !alfa_nunca && ((((control_profundidad >> 1) & 0x1) && ((control_profundidad >> 2) & 0x1)) ||
                           (control_profundidad & 0x1));
-      if (!deja_rastro) {
+      if (!deja_rastro && !exporta) {
         return true;
       }
     }
@@ -1379,7 +1382,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       }
     }
   }
-  if (!hay_destino || !pitch) {
+  // With no target, a memory export runs its vertex shader only: the bound pass stays, nothing is rasterized.
+  const bool solo_exportar = exporta && (!hay_destino || !pitch);
+  if ((!hay_destino || !pitch) && !solo_exportar) {
     return true;  // writes nothing visible
   }
   const bool destino_sombras = pitch >= 1600 && claves[4] && !claves[0] && !claves[1] && !claves[2] && !claves[3];
@@ -1754,7 +1759,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
 
   // --- Render targets
-  if (!g_.pase_valido || std::memcmp(g_.pase, claves, sizeof(claves)) != 0) {
+  if (!solo_exportar && (!g_.pase_valido || std::memcmp(g_.pase, claves, sizeof(claves)) != 0)) {
     if (!EmpezarPase(claves, pitch)) {
       return false;
     }
@@ -1861,12 +1866,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
       }
     }
   }
-  if (vacio) {
+  if (vacio && !solo_exportar) {
     return true;  // empty viewport or scissor
   }
   // The useful area of the bound targets: nothing is drawn below the scissor. If this draw reaches rows the last
   // clear of a target left as they were, they are cleared first (nfsmw_dk_borrar_area_util).
-  {
+  if (!solo_exportar) {
     const uint32_t hasta = tijera.y + tijera.height;
     for (uint32_t i = 0, indice = 0; i < 4; ++i) {
       if (ImagenDk* imagen = imagenes_pase_[i]) {
@@ -1879,7 +1884,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
   // The EDRAM tiles this draw writes are its targets' now (TraerBaldosas): marked again only when the pass or the
   // rows its scissor covers grow.
-  {
+  if (!solo_exportar) {
     const uint32_t desde = tijera.y, hasta = tijera.y + tijera.height;
     if (marcado_serie_ != pase_numero_ || desde < marcado_desde_ || hasta > marcado_hasta_) {
       if (marcado_serie_ != pase_numero_) {
@@ -1966,6 +1971,13 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // or from 0 without indices), so a shader that reads whole buffers by vertex index (Halo 3's translator, r0.x) adds
   // it back to gl_VertexID.
   compartidas[122] = vmin;
+  // Bytes 644 and 648: this draw's region of the memory export record buffer (its first dword, then how many records
+  // fit; 0 = none, and the shader leaves the buffer alone).
+  compartidas[161] = 0;
+  compartidas[162] = 0;
+  if (exporta) {
+    ReservarExportacion(r, con_indices ? n_indices : cuenta, compartidas[161], compartidas[162]);
+  }
   // Byte 640: host pixels per guest pixel along each axis (2 on a 4x MSAA target, drawn in sample space): the
   // translated pixel shaders' screen position (param_gen) is the guest pixel's.
   std::memcpy(&compartidas[160], &pase_escala_, sizeof(pase_escala_));
@@ -2052,6 +2064,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     // such a draw whole (Direct3D's own clears, Halo 3's n2147483649: one triangle over four targets that, clipped,
     // left the loading screen's additive lines to pile up into white).
     rs.depthClampEnable = sin_recorte;
+    rs.rasterizerEnable = !solo_exportar;
     if (!g_.valido || !Iguales(rs, g_.raster)) {
       dkCmdBufBindRasterizerState(cmd, &rs);
       g_.raster = rs;

@@ -457,6 +457,11 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   lecturas_.resize(kRanuras);
   marcas_.resize(kRanuras);
   lectura_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kBytesLecturaRanura, "lecturas de vuelta (por ranura)");
+  export_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kDwordsExportRanura * 4, "registros de exportacion a memoria");
+  if (export_bloque_) {
+    export_cpu_ = static_cast<uint32_t*>(dkMemBlockGetCpuAddr(export_bloque_));
+    export_gpu_ = dkMemBlockGetGpuAddr(export_bloque_);
+  }
   lectura_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(lectura_bloque_));
   lectura_gpu_ = dkMemBlockGetGpuAddr(lectura_bloque_);
   if (REXCVAR_GET(nfsmw_dk_perfil_gpu_s) > 0) {
@@ -566,6 +571,8 @@ void RenderDk::AsegurarTrabajo() {
   descriptores_libres_.insert(descriptores_libres_.end(), libres.begin(), libres.end());
   libres.clear();
   EscribirLecturas(uint32_t(trabajo_ % kRanuras));
+  AplicarExportaciones(uint32_t(trabajo_ % kRanuras));  // its fence has been waited for: the records are written
+  export_ranuras_[trabajo_ % kRanuras].trabajo = trabajo_;
   if (!pasos_.empty()) {
     EscribirPasos();
   }
@@ -2804,6 +2811,13 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
       nucleo_.EsperarTrabajo(fin_fotogramas_[(fotograma_ - uint64_t(en_vuelo)) % 4], trabajo_);
     }
   }
+  // The memory exports of the works the GPU has done: in guest memory before the game's next frame reads them.
+  for (uint32_t i = 0; i < kRanuras; ++i) {
+    const ExportRanura& er = export_ranuras_[i];
+    if (!er.regiones.empty() && er.trabajo != trabajo_ && nucleo_.TrabajoTerminado(er.trabajo)) {
+      AplicarExportaciones(i);
+    }
+  }
   ++fotograma_;
   geometria_.NuevoFotograma(fotograma_);
   PerfilAlCambiarDeFotograma();
@@ -2816,6 +2830,100 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   GuardarCacheSiHaceFalta(false);
   InformePeriodico();
   return pintado;
+}
+
+// ---- Memory export (rex/x360/deko/render.h)
+
+namespace {
+// Bytes per element of a memory export format (xeno_export_elemento stores these), 0 if it does not.
+uint32_t BytesElementoExport(uint32_t formato) {
+  switch (formato) {
+    case 6: case 7: case 25: case 31: case 36:
+      return 4;
+    case 26: case 32: case 37:
+      return 8;
+    case 38:
+      return 16;
+    default:
+      return 0;
+  }
+}
+}  // namespace
+
+void RenderDk::ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad) {
+  dword = capacidad = 0;
+  if (!export_bloque_ || !vertices) {
+    return;
+  }
+  // The streams: the float constants holding a stream constant's signature (Xenia's xe_gpu_memexport_stream_t; dword
+  // 0: base in dwords and 01 on top, 1: 0x4B000000, 2: format etc. under 0x4B0, 3: element count under 0x96).
+  RegionExport region;
+  for (uint32_t c = 0; c < 256 && region.n_flujos < kFlujosExport; ++c) {
+    const uint32_t* k = r + kRegConstantesVs + c * 4;
+    if ((k[0] >> 30) != 1 || k[1] != 0x4B000000u || (k[2] >> 20) != 0x4B0 || (k[3] >> 23) != 0x96) {
+      continue;
+    }
+    const uint32_t base = (k[0] & 0x3FFFFFFFu) << 2;
+    const uint64_t bytes = uint64_t(k[3] & 0x7FFFFFu) * BytesElementoExport((k[2] >> 8) & 0x3F);
+    if (bytes && bytes <= (16u << 20) && base + bytes <= kMemoriaFisica) {
+      region.flujos[region.n_flujos++] = {base, uint32_t(bytes)};
+    }
+  }
+  if (!region.n_flujos) {
+    return;  // nowhere it could write
+  }
+  ExportRanura& er = export_ranuras_[trabajo_ % kRanuras];
+  // Each vertex may store up to 5 elements of up to 4 dwords per alloc; 2 dwords a record, 2 of header.
+  const uint32_t libres = er.usados + 2 < kDwordsExportRanura ? (kDwordsExportRanura - er.usados - 2) / 2 : 0;
+  region.capacidad = std::min<uint32_t>(libres, std::min<uint64_t>(uint64_t(vertices) * 40, 1u << 18));
+  if (!region.capacidad) {
+    ++export_llenos_;
+    return;
+  }
+  region.dword = er.usados;
+  uint32_t* cabecera = export_cpu_ + (trabajo_ % kRanuras) * kDwordsExportRanura + region.dword;
+  cabecera[0] = 0;
+  dkMemBlockFlushCpuCache(export_bloque_, uint32_t(reinterpret_cast<uint8_t*>(cabecera) -
+                                                   reinterpret_cast<uint8_t*>(export_cpu_)), 8);
+  er.usados += 2 + region.capacidad * 2;
+  dword = region.dword;
+  capacidad = region.capacidad;
+  er.regiones.push_back(region);
+  ++export_dibujos_;
+  dkCmdBufBindStorageBuffer(nucleo_.comandos(), DkStage_Vertex, 15,
+                            export_gpu_ + uint64_t(trabajo_ % kRanuras) * kDwordsExportRanura * 4,
+                            kDwordsExportRanura * 4);
+}
+
+void RenderDk::AplicarExportaciones(uint32_t ranura) {
+  ExportRanura& er = export_ranuras_[ranura];
+  if (er.regiones.empty()) {
+    er.usados = 0;
+    return;
+  }
+  const uint32_t* base = export_cpu_ + ranura * kDwordsExportRanura;
+  dkMemBlockFlushCpuCache(export_bloque_, ranura * kDwordsExportRanura * 4, er.usados * 4);  // the GPU's, not the cache
+  for (const RegionExport& region : er.regiones) {
+    const uint32_t* d = base + region.dword;
+    const uint32_t n = std::min(d[0], region.capacidad);
+    export_registros_ += d[0];
+    for (uint32_t i = 0; i < n; ++i) {
+      const uint32_t direccion = d[2 + i * 2], valor = d[3 + i * 2];
+      bool dentro = false;
+      for (uint32_t f = 0; f < region.n_flujos && !dentro; ++f) {
+        dentro = direccion >= region.flujos[f].first && direccion + 4 <= region.flujos[f].first + region.flujos[f].second;
+      }
+      if (!dentro) {
+        ++export_fuera_;
+        continue;
+      }
+      std::memcpy(memoria_->TranslatePhysical(direccion), &valor, 4);  // already in guest byte order
+      ++export_escritos_;
+    }
+  }
+  er.regiones.clear();
+  er.usados = 0;
+  geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch
 }
 
 // ---- The DKSH cache file and the report
@@ -2878,6 +2986,9 @@ void RenderDk::InformePeriodico() {
     informe_z_temprana_ = dibujos_z_temprana_;
     informe_categorias_ = gpu_categorias_ns_;
     informe_sub_borrados_ = gpu_sub_borrados_ns_;
+    informe_export_dibujos_ = export_dibujos_;
+    informe_export_escritos_ = export_escritos_;
+    informe_export_fuera_ = export_fuera_;
     informe_etapas_ = ns_etapas_;
     informe_dedupe_bytes_ = dedupe_.bytes_ahorrados();
     informe_intercambios_ = intercambios_;
@@ -2944,6 +3055,11 @@ void RenderDk::InformePeriodico() {
       "[deko3d] por fotograma, borrados por tipo: al empezar un pase {:.2f} ms, rapidos de D3D {:.2f}, estencil "
       "restaurado {:.2f}, destinos nuevos {:.2f}, pendientes {:.2f}, bandas {:.2f}",
       ms_borrado(0), ms_borrado(1), ms_borrado(2), ms_borrado(3), ms_borrado(4), ms_borrado(5));
+  X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
+               "sus flujos; {} registros en total, {} veces sin sitio",
+               double(export_dibujos_ - informe_export_dibujos_) / fotogramas,
+               double(export_escritos_ - informe_export_escritos_) / fotogramas,
+               double(export_fuera_ - informe_export_fuera_) / fotogramas, export_registros_, export_llenos_);
   const auto us = [&](uint32_t e) { return dibujos ? double(ns_etapas_[e] - informe_etapas_[e]) / double(dibujos) / 1e3 : 0.0; };
   static constexpr const char* kFasesSm[3] = {"mirando", "APLICANDO", "apagada"};
   X360_INFORME(
