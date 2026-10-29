@@ -760,12 +760,48 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
       }
     }
     if (pase_ms) {
+      // The rows a 4x pass can reach: what fits in the EDRAM before the next bound target's base (as Dibujar clips
+      // its draws), in sample rows (16 per tile row).
+      uint32_t limite = UINT32_MAX;
       for (uint32_t i = 0; i < 5; ++i) {
-        if (imagenes[i] && !imagenes[i]->borrado_pendiente) {
-          EmpaquetarMs(*imagenes[i], *ms[i], imagenes[i]->alto_usado ? imagenes[i]->alto_usado : imagenes[i]->alto);
+        if (!claves[i]) {
+          continue;
+        }
+        const uint32_t base = uint32_t(claves[i] >> 24) & 0xFFF, formato = uint32_t(claves[i] >> 16) & 0xF;
+        uint32_t fin = 2048;
+        for (uint32_t k = 0; k < 5; ++k) {
+          const uint32_t otra = uint32_t(claves[k] >> 24) & 0xFFF;
+          if (claves[k] && otra > base) {
+            fin = std::min(fin, otra);
+          }
+        }
+        const bool doble = i < 4 && (formato == 5 || formato == 7 || formato == 15);
+        const uint32_t losas = ((uint32_t(claves[i] & 0xFFFF) + 79) / 80) * (doble ? 2 : 1);
+        if (losas && fin > base) {
+          limite = std::min(limite, (fin - base) / losas * 16);
+        }
+      }
+      for (uint32_t i = 0; i < 5; ++i) {
+        if (ImagenDk* im = imagenes[i]) {
+          if (im->s_nueva) {
+            if (!im->borrado_pendiente) {  // a pending clear covers it on the companion
+              EmpaquetarMs(*im, *ms[i], std::min(im->alto_usado ? im->alto_usado : im->alto, limite));
+            }
+            im->s_nueva = false;
+          }
+          im->ms_nueva = true;
         }
       }
       ++ms_pases_;
+    }
+  }
+  if (!pase_ms) {
+    // Drawn in sample space: what a 4x pass left in a companion comes back first, and this image is the newer copy.
+    for (ImagenDk* im : imagenes) {
+      if (im) {
+        LeerMuestras(*im);
+        im->s_nueva = true;
+      }
     }
   }
   ++pase_numero_;
@@ -1909,6 +1945,13 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   // clear of a target left as they were, they are cleared first (nfsmw_dk_borrar_area_util).
   if (!solo_exportar) {
     const uint32_t hasta = (tijera.y + tijera.height) * (ms_activo_ ? 2 : 1);  // rows of the sample-space image
+    if (ms_activo_) {
+      for (ImagenDk* imagen : imagenes_pase_) {
+        if (imagen) {
+          imagen->ms_filas = std::max(imagen->ms_filas, std::min(hasta, imagen->alto));  // what to unpack later
+        }
+      }
+    }
     for (uint32_t i = 0, indice = 0; i < 4; ++i) {
       if (ImagenDk* imagen = imagenes_pase_[i]) {
         CompletarBanda(*imagen, hasta, true, indice++);

@@ -106,6 +106,12 @@ struct ImagenDk {
   // A 4x MSAA target (sample space, 2x2 samples a pixel) bound through its real 4x companion (deko_msaa_real): the
   // pass draws there, and clears of the bound target use its rows halved.
   bool ms_ligada = false;
+  // Which copy is newer: s_nueva, this sample-space image (written outside a 4x pass: packed before the next one);
+  // ms_nueva, the 4x companion (drawn in a 4x pass: unpacked before anything else reads or writes this image). Only
+  // when it matters, and over the rows the 4x passes drew (ms_filas, in this image's rows).
+  bool s_nueva = true;
+  bool ms_nueva = false;
+  uint32_t ms_filas = 0;
 };
 
 // A texture the game reads from its memory, with what decides when to look at its bytes again.
@@ -455,6 +461,8 @@ class RenderDk final : public DestinosNativos {
   void EmpaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas);
   void DesempaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas);
   void CerrarPaseMs();
+  void LeerMuestras(ImagenDk& imagen);     // before reading it outside a 4x pass
+  void EscribirMuestras(ImagenDk& imagen);  // before writing it outside a 4x pass (a partial write keeps the rest)
   void TerminarPase() {
     EmitirCieloPendiente();  // the deferred sky draws in the pass, before its targets go back to sample space
     CerrarPaseMs();

@@ -786,6 +786,8 @@ void RenderDk::AntesDe3D() {
 
 bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
                         ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras) {
+  LeerMuestras(const_cast<ImagenDk&>(origen));
+  EscribirMuestras(destino);
   const bool z = destino.profundidad;
   if (!vs_salida_valido_ || !(z ? fs_copia_profundidad_valido_ : fs_copia_color_valido_)) {
     return false;
@@ -914,6 +916,7 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
   MarcarGpu(kGpuSubBorradoRapido);
   for (uint32_t i = 0; i < n; ++i) {
     ImagenDk& imagen = *imagenes[i];
+    EscribirMuestras(imagen);
     HacerBorradoPendiente(imagen);
     DkImageView vista;
     dkImageViewDefaults(&vista, &imagen.imagen);
@@ -1132,6 +1135,8 @@ void RenderDk::RestaurarEstencil(const ImagenDk& color, ImagenDk& profundidad, c
   if (!vs_salida_valido_ || !fs_estencil_valido_ || !rect.width || !rect.height) {
     return;
   }
+  LeerMuestras(const_cast<ImagenDk&>(color));
+  EscribirMuestras(profundidad);
   AsegurarTrabajo();
   TerminarPase();
   HacerBorradoPendiente(profundidad);  // a pending clear first: the stencil written here must survive it
@@ -1262,6 +1267,7 @@ void RenderDk::DestruirImagen(ImagenDk& imagen) {
 }
 
 void RenderDk::PrepararDestino(ImagenDk& imagen) {
+  EscribirMuestras(imagen);
   AsegurarTrabajo();
   MarcarGpu(kGpuSubPreparar);
   // The values as the game's clears write them: color 0, and depth 1.0 with stencil 0 as RB_DEPTH_CLEAR.
@@ -1674,6 +1680,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
+  if (destino_render) {
+    LeerMuestras(*destino_render);  // what a 4x pass drew there, back in sample space for the resolve
+  }
   if (!destino_render) {
     return false;
   }
@@ -1900,6 +1909,7 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
     return;
   }
   AntesDeCambiarDestino(&destino);
+  EscribirMuestras(destino);
   destino.borrado_pendiente = false;
   AsegurarTrabajo();
   TerminarPase();
@@ -1941,6 +1951,9 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
   }
   destino.alto_borrado = desde == 0 ? hasta : std::max(destino.alto_borrado, hasta);
   destino.banda_sucia = destino.alto_borrado < destino.alto;
+  if (destino.ms_ligada) {
+    destino.ms_filas = std::max(destino.ms_filas, std::min(hasta, destino.alto));
+  }
 }
 
 void RenderDk::CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, uint32_t i) {
@@ -1961,6 +1974,7 @@ void RenderDk::CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, ui
     return;
   }
   AntesDeCambiarDestino(&destino);
+  EscribirMuestras(destino);
   AsegurarTrabajo();
   TerminarPase();
   AntesDe3D();
@@ -1994,6 +2008,7 @@ void RenderDk::MaterializarFrontal() {
 }
 
 void RenderDk::IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta) {
+  EscribirMuestras(destino);  // its image is about to be another: what its companion drew goes in first
   std::swap(destino.imagen, resuelta.imagen);
   std::swap(destino.memoria, resuelta.memoria);
   std::swap(destino.serie, resuelta.serie);  // the descriptors go with their image
@@ -2018,6 +2033,7 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
   if (!para_resolver && SombraMinimoEnVezDeRestaurar(destino)) {
     return;
   }
+  EscribirMuestras(destino);
   AsegurarTrabajo();
   TerminarPase();
   if (!Copiar3D(it->second.imagen, 0, 0, destino.ancho, destino.alto, destino, 0, 0)) {
@@ -2096,6 +2112,7 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
   TerminarPase();
   // What is resolved must be the target's real content: a swap may have taken it away, a clear may be pending, the
   // useful area grows to what is read.
+  LeerMuestras(*profundidad);
   RestaurarContenido(*profundidad, true);
   if (y1 > 0) {
     profundidad->alto_usado =
@@ -2974,6 +2991,7 @@ ImagenDk* RenderDk::CompaneraMs(const ImagenDk& muestras) {
     return nullptr;
   }
   REXLOG_INFO("[deko3d] companera 4x de {}x{} ({})", ancho, alto, muestras.profundidad ? "profundidad" : "color");
+  const_cast<ImagenDk&>(muestras).s_nueva = true;  // a new companion holds nothing yet
   return &ms_de_.emplace(muestras.serie, m).first->second;
 }
 
@@ -3072,18 +3090,36 @@ void RenderDk::CerrarPaseMs() {
     return;
   }
   ms_activo_ = false;
+  // The companions keep what was drawn (ms_nueva): unpacked only when something else needs the sample-space image
+  // (LeerMuestras), so 4x passes in a row (Halo 3's depth clear then its G-buffer, tile after tile) hand nothing back.
   for (ImagenDk* imagen : imagenes_pase_) {
     if (imagen && imagen->ms_ligada) {
       imagen->ms_ligada = false;
-      if (ImagenDk* ms = CompaneraMs(*imagen)) {
-        DesempaquetarMs(*imagen, *ms, imagen->alto_usado ? imagen->alto_usado : imagen->alto);
-      }
     }
   }
   const DkMultisampleState uno = EstadoMuestras(false);
   dkCmdBufBindMultisampleState(nucleo_.comandos(), &uno);
   g_.pase_valido = false;  // the next draw binds its targets again (and packs them if it is 4x)
   OlvidarEstado();
+}
+
+void RenderDk::LeerMuestras(ImagenDk& imagen) {
+  if (!imagen.ms_nueva) {
+    return;
+  }
+  CerrarPaseMs();  // it may still be bound
+  imagen.ms_nueva = false;
+  if (ImagenDk* ms = CompaneraMs(imagen)) {
+    if (imagen.ms_filas) {
+      DesempaquetarMs(imagen, *ms, imagen.ms_filas);
+    }
+  }
+  imagen.ms_filas = 0;
+}
+
+void RenderDk::EscribirMuestras(ImagenDk& imagen) {
+  LeerMuestras(imagen);
+  imagen.s_nueva = true;
 }
 
 // ---- Memory export (rex/x360/deko/render.h)
