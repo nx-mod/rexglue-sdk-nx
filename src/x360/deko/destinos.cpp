@@ -655,6 +655,7 @@ void RenderDk::AsegurarTrabajo() {
   EscribirLecturas(uint32_t(trabajo_ % kRanuras));
   AplicarExportaciones(uint32_t(trabajo_ % kRanuras));  // its fence has been waited for: the records are written
   export_ranuras_[trabajo_ % kRanuras].trabajo = trabajo_;
+  export_ranuras_[trabajo_ % kRanuras].fotograma = fotograma_;
   if (!pasos_.empty()) {
     EscribirPasos();
   }
@@ -3213,6 +3214,33 @@ void RenderDk::ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_
                             kDwordsExportRanura * 4);
 }
 
+void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
+  for (;;) {
+    // The oldest slot of an earlier frame with records over [inicio, fin).
+    int32_t elegida = -1;
+    for (uint32_t i = 0; i < kRanuras; ++i) {
+      const ExportRanura& er = export_ranuras_[i];
+      if (er.regiones.empty() || er.fotograma >= fotograma_ || er.trabajo == trabajo_ ||
+          (elegida >= 0 && er.trabajo >= export_ranuras_[elegida].trabajo)) {
+        continue;
+      }
+      for (const RegionExport& region : er.regiones) {
+        for (uint32_t f = 0; f < region.n_flujos; ++f) {
+          if (inicio < region.flujos[f].first + region.flujos[f].second && region.flujos[f].first < fin) {
+            elegida = int32_t(i);
+          }
+        }
+      }
+    }
+    if (elegida < 0) {
+      return;
+    }
+    nucleo_.EsperarTrabajo(export_ranuras_[elegida].trabajo, trabajo_);
+    AplicarExportaciones(uint32_t(elegida));
+    ++export_esperas_;
+  }
+}
+
 void RenderDk::AplicarExportaciones(uint32_t ranura) {
   ExportRanura& er = export_ranuras_[ranura];
   if (er.regiones.empty()) {
@@ -3390,10 +3418,11 @@ void RenderDk::InformePeriodico() {
   X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados en total", ms_pases_, ms_empaquetados_,
                ms_desempaquetados_);
   X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
-               "sus flujos; {} registros en total, {} veces sin sitio",
+               "sus flujos; {} registros en total, {} veces sin sitio, {} esperas",
                double(export_dibujos_ - informe_export_dibujos_) / fotogramas,
                double(export_escritos_ - informe_export_escritos_) / fotogramas,
-               double(export_fuera_ - informe_export_fuera_) / fotogramas, export_registros_, export_llenos_);
+               double(export_fuera_ - informe_export_fuera_) / fotogramas, export_registros_, export_llenos_,
+               export_esperas_);
   const auto us = [&](uint32_t e) { return dibujos ? double(ns_etapas_[e] - informe_etapas_[e]) / double(dibujos) / 1e3 : 0.0; };
   static constexpr const char* kFasesSm[3] = {"mirando", "APLICANDO", "apagada"};
   X360_INFORME(

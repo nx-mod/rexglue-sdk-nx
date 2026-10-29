@@ -452,7 +452,12 @@ class RenderDk final : public DestinosNativos {
     std::vector<RegionExport> regiones;
     uint32_t usados = 0;     // dwords
     uint64_t trabajo = 0;    // the work that wrote them
+    uint64_t fotograma = 0;  // the frame that work belongs to
   };
+  // A draw about to read guest memory that an earlier frame's exports are still writing (not applied yet): waits for
+  // that work and applies them, oldest first (the H3Recomp PC port's SyncMemExportsFor). This frame's own exports are
+  // not waited for: every particle update writes the same streams, and waiting on them would stall each one.
+  void SincronizarExportaciones(uint32_t inicio, uint32_t fin);
   // ---- Real 4x MSAA (deko_msaa_real). A 4x surface's target lives in sample space (2x2 samples a pixel, the image
   // at twice the pitch: what the EDRAM aliasing, the resolves and the tiles work on). Drawn there, every pixel shader
   // ran once a sample; the Xenos shades once a pixel. A 4x pass now draws into a multisampled companion at pixel size
@@ -491,6 +496,7 @@ class RenderDk final : public DestinosNativos {
   std::vector<RangoExportado> exportados_;
   uint64_t export_serie_ = 0;  // goes up each time records are written
   uint64_t export_dibujos_ = 0, export_registros_ = 0, export_escritos_ = 0, export_fuera_ = 0, export_llenos_ = 0;
+  uint64_t export_esperas_ = 0;
   uint64_t informe_export_dibujos_ = 0, informe_export_escritos_ = 0, informe_export_fuera_ = 0;
   void RecogerCompilaciones();
 

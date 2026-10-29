@@ -1815,6 +1815,9 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
         bytes = uint32_t(std::clamp<int64_t>(hasta, inicio, bytes)) - inicio;
       }
       bytes = std::min<uint32_t>(bytes, 4u << 20);
+      if (bytes && export_bloque_) {
+        SincronizarExportaciones(direccion + inicio, direccion + inicio + bytes);  // an earlier frame's exports first
+      }
       buferes_vf[n_buferes_vf++] = {e->vertices ? DkStage_Vertex : DkStage_Fragment, b,
                                     bytes ? memoria_->TranslatePhysical(direccion + inicio) : nullptr,
                                     static_cast<xenos::Endian>(d1 & 0x3), bytes, inicio};
