@@ -230,6 +230,9 @@ class RenderDk final : public DestinosNativos {
   // then times `escala`).
   // kCopiaDesde7e3: the reverse, 7e3 bits held as unorm back to their float value.
   static constexpr int32_t kCopiaValor = 0, kCopia7e3 = 1, kCopiaDesde7e3 = 2;
+  // The EDRAM aliasing between an 8_8_8_8 image and a 7e3 one at the same base: the same 32-bit words read in the other
+  // layout (bytes vs 10:10:10 7e3 fields and 2 alpha bits), not channel by channel.
+  static constexpr int32_t kCopia7e3A8888 = 3, kCopia8888A7e3 = 4;
   // The Xenos has one EDRAM, and a game draws targets of different bases and pitches over the same tiles (Halo 3:
   // 1200-wide frames, 400-, 640- and 1160-wide passes, 1200x1200 clears that wrap past the end). Each base has its
   // own image here, so the last writer of every tile is kept (dueno_baldosa_): MarcarBaldosas when a target is drawn

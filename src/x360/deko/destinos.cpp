@@ -412,7 +412,16 @@ void main() {
   } else {
     v = texelFetch(origen, p + copia.desplazamiento.xy, 0);
   }
-  if (copia.modo.x == 2) {
+  if (copia.modo.x == 3) {
+    // A 7e3 drawing read as 8_8_8_8: its 32-bit word (R | G << 10 | B << 20 | A << 30), byte by byte.
+    uint w = a7e3(v.r) | (a7e3(v.g) << 10) | (a7e3(v.b) << 20) | (uint(round(clamp(v.a, 0.0, 1.0) * 3.0)) << 30);
+    v = vec4(float(w & 0xFFu), float((w >> 8) & 0xFFu), float((w >> 16) & 0xFFu), float(w >> 24)) / 255.0;
+  } else if (copia.modo.x == 4) {
+    // An 8_8_8_8 drawing read as 7e3: its bytes as one word, then the three 7e3 fields and the 2 alpha bits.
+    uvec4 b = uvec4(round(clamp(v, 0.0, 1.0) * 255.0));
+    uint w = b.r | (b.g << 8) | (b.b << 16) | (b.a << 24);
+    v = vec4(de7e3(w), de7e3(w >> 10), de7e3(w >> 20), float(w >> 30) / 3.0);
+  } else if (copia.modo.x == 2) {
     uvec3 b = uvec3(round(clamp(v.rgb, 0.0, 1.0) * 1023.0));
     v = vec4(de7e3(b.r), de7e3(b.g), de7e3(b.b), v.a);
   } else if (copia.modo.x == 1) {
@@ -1014,10 +1023,10 @@ void RenderDk::TraerBaldosas(ImagenDk& imagen, uint32_t filas) {
       const bool destino_flotante = imagen.formato == DkImageFormat_RGBA16_Float;
       int32_t modo = kCopiaValor;
       if (origen_flotante && !destino_flotante && (origen->formato_dibujo == 3 || origen->formato_dibujo == 12)) {
-        modo = kCopia7e3;
+        modo = kCopia7e3A8888;
       } else if (!origen_flotante && destino_flotante &&
                  (imagen.formato_dibujo == 3 || imagen.formato_dibujo == 12)) {
-        modo = kCopiaDesde7e3;
+        modo = kCopia8888A7e3;
       }
       HacerBorradoPendiente(*origen);
       if (Copiar3D(*origen, xo, yo, w, h, imagen, xd, yd, modo, 1.0f)) {
@@ -1404,17 +1413,18 @@ void RenderDk::LlevarContenido(ImagenDk& origen, ImagenDk& destino, uint32_t for
   const bool destino_flotante = destino.formato == DkImageFormat_RGBA16_Float;
   const bool origen_7e3 = origen.formato_dibujo == 3 || origen.formato_dibujo == 12;
   const bool destino_7e3 = formato_destino == 3 || formato_destino == 12;
+  // Between the float image and the 8-bit one the 32-bit words are read in the other layout.
   int32_t modo = kCopiaValor;
   if (origen_flotante && !destino_flotante && origen_7e3) {
-    modo = kCopia7e3;
+    modo = kCopia7e3A8888;
   } else if (!origen_flotante && destino_flotante && destino_7e3) {
-    modo = kCopiaDesde7e3;
+    modo = kCopia8888A7e3;
   }
   HacerBorradoPendiente(origen);
   const uint32_t alto = std::min(origen.alto, std::max(origen.alto_usado, destino.alto_usado) ? std::max(origen.alto_usado, destino.alto_usado) : origen.alto);
   const uint32_t ancho = std::min(origen.ancho, destino.ancho);
   if (Copiar3D(origen, 0, 0, ancho, alto, destino, 0, 0, modo, 1.0f)) {
-    destino.formato_dibujo = origen_7e3 && modo == kCopiaDesde7e3 ? uint8_t(formato_destino) : origen.formato_dibujo;
+    destino.formato_dibujo = modo == kCopia8888A7e3 ? uint8_t(formato_destino) : origen.formato_dibujo;
     destino.alto_usado = std::max(destino.alto_usado, alto);
     destino.borrado_pendiente = false;
     ++contenidos_llevados_;
@@ -1774,7 +1784,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
                             destino_render->formato == DkImageFormat_RGBA16_Float;
       const bool desde_7e3 = (formato_color == 3 || formato_color == 12) &&
                              destino_render->formato == DkImageFormat_RGBA8_Unorm;
-      const int32_t modo_copia = bits_7e3 ? kCopia7e3 : desde_7e3 ? kCopiaDesde7e3 : kCopiaValor;
+      const int32_t modo_copia = bits_7e3 ? kCopia7e3 : desde_7e3 ? kCopia8888A7e3 : kCopiaValor;
       const bool transforma = bits_7e3 || desde_7e3 || sesgo != 0;
       static const bool frontal_perezoso = REXCVAR_GET(nfsmw_nativo_frontal_perezoso);
       const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
