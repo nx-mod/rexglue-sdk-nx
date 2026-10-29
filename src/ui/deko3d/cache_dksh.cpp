@@ -23,6 +23,8 @@ constexpr size_t kCabecera = 32;
 constexpr size_t kEntrada = 24;
 constexpr uint32_t kMaxEntradas = 1u << 16;
 constexpr uint32_t kMaxDksh = 1u << 20;
+constexpr uint32_t kMagiaDiario = 0x4A44464Eu;  // "NFDJ"
+constexpr size_t kCabeceraDiario = 16;
 
 uint32_t U32(const uint8_t* p) {
   uint32_t v;
@@ -122,7 +124,63 @@ const std::vector<uint8_t>* CacheDksh::Buscar(const Clave& clave) const {
 }
 
 void CacheDksh::Anadir(const Clave& clave, std::vector<uint8_t> dksh) {
-  entradas_[clave] = std::move(dksh);
+  auto [it, nueva] = entradas_.insert_or_assign(clave, std::move(dksh));
+  if (nueva) {
+    nuevas_.push_back(clave);
+  }
+}
+
+std::vector<uint8_t> CacheDksh::SerializarNuevas(bool cabecera) {
+  std::vector<uint8_t> d;
+  if (cabecera) {
+    d.resize(kCabeceraDiario);
+    const uint32_t c[2] = {kMagiaDiario, kVersion};
+    Poner(d, 0, c, 8);
+    const uint64_t id = HuellaId();
+    Poner(d, 8, &id, 8);
+  }
+  for (const Clave& clave : nuevas_) {
+    const auto it = entradas_.find(clave);
+    if (it == entradas_.end()) {
+      continue;
+    }
+    const std::vector<uint8_t>& dksh = it->second;
+    const size_t at = d.size();
+    d.resize(at + kEntrada + ((dksh.size() + 3) & ~size_t(3)), 0);
+    const uint32_t bytes = uint32_t(dksh.size());
+    const uint32_t control = uint32_t(XXH3_64bits(dksh.data(), dksh.size()));
+    Poner(d, at, &clave.huella, 8);
+    Poner(d, at + 8, &clave.especializacion, 4);
+    Poner(d, at + 12, &clave.variante, 4);
+    Poner(d, at + 16, &bytes, 4);
+    Poner(d, at + 20, &control, 4);
+    if (bytes) {
+      Poner(d, at + kEntrada, dksh.data(), bytes);
+    }
+  }
+  nuevas_.clear();
+  return d;
+}
+
+int CacheDksh::CargarDiario(std::span<const uint8_t> diario) {
+  if (diario.size() < kCabeceraDiario || U32(diario.data()) != kMagiaDiario || U32(diario.data() + 4) != kVersion ||
+      U64(diario.data() + 8) != HuellaId()) {
+    return -1;
+  }
+  int anadidas = 0;
+  size_t at = kCabeceraDiario;
+  while (at + kEntrada <= diario.size()) {
+    const uint8_t* e = diario.data() + at;
+    const uint32_t bytes = U32(e + 16);
+    if (bytes > kMaxDksh || at + kEntrada + bytes > diario.size() ||
+        uint32_t(XXH3_64bits(e + kEntrada, bytes)) != U32(e + 20)) {
+      break;
+    }
+    entradas_[{U64(e), U32(e + 8), U32(e + 12)}].assign(e + kEntrada, e + kEntrada + bytes);
+    ++anadidas;
+    at += kEntrada + ((bytes + 3) & ~size_t(3));
+  }
+  return anadidas;
 }
 
 }  // namespace rex::deko3d

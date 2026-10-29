@@ -42,6 +42,17 @@ class CacheDksh {
   bool Cargar(std::span<const uint8_t> archivo, std::string& motivo);
   std::vector<uint8_t> Serializar() const;
 
+  // The journal beside the file: what Anadir added since the last SerializarNuevas, appended to it instead of
+  // writing the whole file again (18 MB with Halo 3's shaders, every 20 s while new ones compile). Layout: "NFDJ",
+  // version, XXH3 of IdCompilador(), then entries {u64 fingerprint, u32 specialization, u32 variant, u32 bytes,
+  // u32 low half of the DKSH's XXH3} each followed by its DKSH padded to 4. With `cabecera` the 16-byte header goes
+  // first (a new journal).
+  std::vector<uint8_t> SerializarNuevas(bool cabecera);
+  bool HayNuevas() const { return !nuevas_.empty(); }
+  // Adds a journal's entries; stops at the first one cut short or damaged (a write the console did not finish).
+  // The number added, or -1 if it is not a journal of this compiler.
+  int CargarDiario(std::span<const uint8_t> diario);
+
   struct Clave {
     uint64_t huella = 0;
     uint32_t especializacion = 0;
@@ -56,6 +67,7 @@ class CacheDksh {
 
  private:
   std::map<Clave, std::vector<uint8_t>> entradas_;
+  std::vector<Clave> nuevas_;  // added since the last SerializarNuevas
 };
 
 }  // namespace rex::deko3d

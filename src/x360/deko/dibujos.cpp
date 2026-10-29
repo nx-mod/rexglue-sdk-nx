@@ -1122,6 +1122,13 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
     // next draws find it in the cache once RecogerCompilaciones has added it; one that fails stays skipped.
     const uint64_t h = XXH3_64bits(&clave_cache, sizeof(clave_cache));
     if (en_fondo_.emplace(h, true).second) {
+      // Each one with its key: two runs that compile the same shader twice show it (a key that changes between runs).
+      static uint32_t anotados = 0;
+      if (anotados < 1000) {
+        ++anotados;
+        REXLOG_INFO("[deko3d] compilando en segundo plano: {} huella {:016X} microcodigo {:016X}", nombre,
+                    clave_cache.huella, entrada.huella);
+      }
       deko::GlslDeko g = a_glsl(espirv, entrada.vertices ? variante : kTodasLasSalidas);
       if (!entrada.vertices && (variante_ps & kVarianteZTemprana)) {
         DeclararZTemprana(g.glsl);

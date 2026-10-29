@@ -228,6 +228,28 @@ DkImageView VistaCompleta(const DkImage& imagen) {
 }
 
 std::filesystem::path RutaCache() { return rex::filesystem::GetExecutableFolder() / "cache" / "nfsmw_dksh.bin"; }
+std::filesystem::path RutaDiario() { return RutaCache().string() + ".diario"; }
+
+// The whole file, through a temporary and a rename (a cut write leaves the old one).
+bool EscribirArchivo(const std::filesystem::path& ruta, const std::vector<uint8_t>& datos) {
+  std::error_code error;
+  std::filesystem::create_directories(ruta.parent_path(), error);
+  const std::filesystem::path temporal = ruta.string() + ".tmp";
+  {
+    std::ofstream f(temporal, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(datos.data()), std::streamsize(datos.size()));
+    if (!f) {
+      REXLOG_WARN("[deko3d] no se pudo escribir {}", temporal.string());
+      return false;
+    }
+  }
+  std::filesystem::rename(temporal, ruta, error);
+  if (error) {
+    std::filesystem::remove(ruta, error);
+    std::filesystem::rename(temporal, ruta, error);
+  }
+  return !error;
+}
 
 // ---- The output pass's shaders (GLSL for uam). The same work as the Vulkan path's nfsmw_salida_rampa_gamma.frag
 // (see it for the reasons): a full-screen triangle, the source's texel, and the game's ramp.
@@ -447,6 +469,7 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
   RecalcularRampa();
 
   // The DKSH cache: the console's own, or the one the PC tool made (shaders/dksh) next to the NRO.
+  const uint64_t inicio_cache = deko::AhoraNs();
   std::string motivo;
   for (const std::filesystem::path& ruta :
        {RutaCache(), rex::filesystem::GetExecutableFolder() / "shadercache_dksh.bin"}) {
@@ -461,6 +484,30 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
     }
     REXLOG_WARN("[deko3d] cache de DKSH {} no se usa: {}", ruta.string(), motivo);
   }
+  {
+    // The journal of the last runs (GuardarCacheSiHaceFalta): merged, then written into the file once, here at start
+    // and on the writer thread, so the journal starts empty.
+    std::ifstream f(RutaDiario(), std::ios::binary);
+    if (f) {
+      std::vector<uint8_t> datos((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      const int anadidas = cache_.CargarDiario(datos);
+      REXLOG_INFO("[deko3d] diario de la cache de DKSH: {} entradas ({} KB)", anadidas, datos.size() >> 10);
+      if (anadidas > 0) {
+        auto completa = std::make_shared<std::vector<uint8_t>>(cache_.Serializar());
+        guardando_ = std::thread([completa] {
+          if (EscribirArchivo(RutaCache(), *completa)) {
+            std::error_code error;
+            std::filesystem::remove(RutaDiario(), error);
+          }
+        });
+      } else {
+        std::error_code error;
+        std::filesystem::remove(RutaDiario(), error);
+      }
+    }
+  }
+  REXLOG_INFO("[deko3d] cache de DKSH lista en {:.0f} ms: {} entradas", double(deko::AhoraNs() - inicio_cache) / 1e6,
+              cache_.size());
   if (!cache_.size()) {
     REXLOG_WARN("[deko3d] sin cache de DKSH: cada shader se compila en la consola la primera vez que se usa");
   }
@@ -2759,39 +2806,33 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
 
 void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
   const uint64_t ahora = deko::AhoraNs();
-  if (!cache_sucia_ || (!ya && ahora - cache_guardada_ns_ < 20'000'000'000ull)) {
+  if (!cache_sucia_ || !cache_.HayNuevas() || (!ya && ahora - cache_guardada_ns_ < 3'000'000'000ull)) {
     return;
   }
   cache_sucia_ = false;
   cache_guardada_ns_ = ahora;
-  // Serialized here (the ring thread owns the cache), written on another thread: ~2 MB to the SD card would be a
-  // stutter.
-  auto datos = std::make_shared<std::vector<uint8_t>>(cache_.Serializar());
+  // Only the shaders added since the last time, appended to the journal (the whole file was 18 MB with Halo 3's, every
+  // 20 s: a hitch here and a long SD write while the game streams). The start merges it into the file.
+  std::error_code error;
+  const bool nuevo = !std::filesystem::exists(RutaDiario(), error);
+  auto datos = std::make_shared<std::vector<uint8_t>>(cache_.SerializarNuevas(nuevo));
   const size_t entradas = cache_.size();
-  auto escribir = [datos, entradas] {
-    std::error_code error;
-    const std::filesystem::path ruta = RutaCache();
-    std::filesystem::create_directories(ruta.parent_path(), error);
-    const std::filesystem::path temporal = ruta.string() + ".tmp";
-    {
-      std::ofstream f(temporal, std::ios::binary | std::ios::trunc);
-      f.write(reinterpret_cast<const char*>(datos->data()), std::streamsize(datos->size()));
-      if (!f) {
-        REXLOG_WARN("[deko3d] no se pudo escribir {}", temporal.string());
-        return;
-      }
+  auto escribir = [datos, entradas, nuevo] {
+    std::error_code e;
+    std::filesystem::create_directories(RutaCache().parent_path(), e);
+    std::ofstream f(RutaDiario(), std::ios::binary | std::ios::app);
+    f.write(reinterpret_cast<const char*>(datos->data()), std::streamsize(datos->size()));
+    if (!f) {
+      REXLOG_WARN("[deko3d] no se pudo escribir {}", RutaDiario().string());
+      return;
     }
-    std::filesystem::rename(temporal, ruta, error);
-    if (error) {
-      std::filesystem::remove(ruta, error);
-      std::filesystem::rename(temporal, ruta, error);
-    }
-    REXLOG_INFO("[deko3d] cache de DKSH guardada: {} entradas, {} KB", entradas, datos->size() >> 10);
+    REXLOG_INFO("[deko3d] cache de DKSH: {} KB al diario{} ({} entradas en total)", datos->size() >> 10,
+                nuevo ? " nuevo" : "", entradas);
   };
   // One write at a time, on a thread that is joined, never detached: libnx has no pthread_detach, and
   // std::thread::detach() throws (std::system_error, "Function not implemented") and ends the process.
   if (guardando_.joinable()) {
-    guardando_.join();  // the previous one, 20 s or more ago
+    guardando_.join();  // the previous one (or the start's merge), 3 s or more ago
   }
   if (ya) {
     escribir();
