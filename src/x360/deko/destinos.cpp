@@ -3221,10 +3221,20 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
   }
   const uint32_t* base = export_cpu_ + ranura * kDwordsExportRanura;
   dkMemBlockFlushCpuCache(export_bloque_, ranura * kDwordsExportRanura * 4, er.usados * 4);  // the GPU's, not the cache
+  // Older than a texture's longest interval: no check is still waiting for them.
+  std::erase_if(exportados_, [&](const RangoExportado& e) { return e.fotograma + 64 < fotograma_; });
+  bool escrito = false;
   for (const RegionExport& region : er.regiones) {
     const uint32_t* d = base + region.dword;
     const uint32_t n = std::min(d[0], region.capacidad);
     export_registros_ += d[0];
+    if (n) {
+      escrito = true;
+      for (uint32_t f = 0; f < region.n_flujos; ++f) {
+        exportados_.push_back(
+            {region.flujos[f].first, region.flujos[f].first + region.flujos[f].second, fotograma_, export_serie_ + 1});
+      }
+    }
     for (uint32_t i = 0; i < n; ++i) {
       const uint32_t direccion = d[2 + i * 2], valor = d[3 + i * 2];
       bool dentro = false;
@@ -3242,6 +3252,10 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
   er.regiones.clear();
   er.usados = 0;
   geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch
+  if (escrito) {
+    ++export_serie_;
+    ++generacion_texturas_;  // the draws' per-fetch texture cache asks again (PrepararTextura rechecks over them)
+  }
 }
 
 // ---- The DKSH cache file and the report

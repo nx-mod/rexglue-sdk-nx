@@ -713,6 +713,18 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
   };
   ancho_out = textura.imagen.ancho;
   alto_out = textura.imagen.alto;
+  // Memory export wrote over it since its last check: checked whole now, its interval back to 1.
+  if (textura.con_contenido && textura.rango_fin) {
+    for (const RangoExportado& e : exportados_) {
+      if (e.serie > textura.serie_export && e.inicio < textura.rango_fin && textura.rango_inicio < e.fin) {
+        textura.fotograma = UINT64_MAX;
+        textura.siguiente = 0;
+        textura.intervalo = 1;
+        textura.muestra_valida = false;
+        break;
+      }
+    }
+  }
   if (textura.fotograma == fotograma_) {
     return listo();  // already checked this frame
   }
@@ -720,6 +732,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
     return listo();
   }
   textura.fotograma = fotograma_;
+  textura.serie_export = export_serie_;
   // 2D and cubemaps: the guest bytes are fingerprinted before untiling; unchanged, nothing to do.
   if (!volumen) {
     const uint32_t log2_bloque = Log2Bytes(tf.bytes);
@@ -734,6 +747,8 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
                 : uint64_t(std::max(pitch_bloques, bloques_x_leidos)) * tf.bytes * (bloques_y_leidos - 1) +
                       uint64_t(bloques_x_leidos) * tf.bytes;
     const uint64_t extension = (capas - 1) * zancada_cara + extension_capa;
+    textura.rango_inicio = uint32_t(dir_base);
+    textura.rango_fin = uint32_t(std::min<uint64_t>(dir_base + extension, kMemoriaFisica));
     if (dir_base + extension <= kMemoriaFisica) {
       // At the maximum interval, from 32 to 39 depending on the texture, so they do not coincide.
       auto sin_cambios = [&] {

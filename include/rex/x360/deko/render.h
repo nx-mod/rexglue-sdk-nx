@@ -130,6 +130,8 @@ struct TexturaDk {
   uint32_t aplazamientos = 0;
   uint64_t bytes = 0;
   std::array<uint64_t, 6> caras_version{};  // a cubemap of resolved faces: the version of each face it holds
+  uint32_t rango_inicio = 0, rango_fin = 0;  // the guest bytes its last check read (base level)
+  uint64_t serie_export = 0;                 // RenderDk::export_serie_ at its last check
 };
 
 // The vertex input of a vertex shader with the fetches D3D patched into it (the Vulkan backend's EntradaVertices,
@@ -480,6 +482,14 @@ class RenderDk final : public DestinosNativos {
   uint32_t* export_cpu_ = nullptr;
   DkGpuAddr export_gpu_ = 0;
   std::array<ExportRanura, 3> export_ranuras_{};
+  // The guest ranges memory export wrote, and the frame: a texture over one is checked whole at its next use, whatever
+  // its interval or sample said (Halo 3 reads exported results as textures: exposure, light visibility).
+  struct RangoExportado {
+    uint32_t inicio, fin;
+    uint64_t fotograma, serie;
+  };
+  std::vector<RangoExportado> exportados_;
+  uint64_t export_serie_ = 0;  // goes up each time records are written
   uint64_t export_dibujos_ = 0, export_registros_ = 0, export_escritos_ = 0, export_fuera_ = 0, export_llenos_ = 0;
   uint64_t informe_export_dibujos_ = 0, informe_export_escritos_ = 0, informe_export_fuera_ = 0;
   void RecogerCompilaciones();
