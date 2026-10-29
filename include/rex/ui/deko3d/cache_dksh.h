@@ -32,6 +32,11 @@ namespace rex::deko3d {
 // "uam ... ; SPIRV-Cross ... ; GLSL revision N". Change the first two with tools/fetch_thirdparty.py's commits.
 std::string IdCompilador();
 
+// The game's stamp for the entries it adds (0 = none, every entry kept, as NFS): Halo 3 gives the hash of its
+// translator's prelude. Its translated shaders' text includes the prelude, so an entry made under another prelude can
+// never be found again: the file drops those when it is written. Before the renderer is created.
+void FijarSalCache(uint32_t sal);
+
 // XXH3 of the SPIR-V words as given to SpirvAGlsl.
 uint64_t HuellaSpirv(std::span<const uint32_t> espirv);
 
@@ -48,7 +53,7 @@ class CacheDksh {
   // u32 low half of the DKSH's XXH3} each followed by its DKSH padded to 4. With `cabecera` the 16-byte header goes
   // first (a new journal).
   std::vector<uint8_t> SerializarNuevas(bool cabecera);
-  bool HayNuevas() const { return !nuevas_.empty(); }
+  bool HayNuevas() const { return !nuevas_.empty() || !usos_.empty(); }
   // Adds a journal's entries; stops at the first one cut short or damaged (a write the console did not finish).
   // The number added, or -1 if it is not a journal of this compiler.
   int CargarDiario(std::span<const uint8_t> diario);
@@ -62,12 +67,17 @@ class CacheDksh {
   // nullptr if it is not there. Valid until the next Anadir or Cargar.
   const std::vector<uint8_t>* Buscar(const Clave& clave) const;
   void Anadir(const Clave& clave, std::vector<uint8_t> dksh);
+  // An entry the renderer found and uses: stamped with the game's stamp (journaled if that changed it), so the
+  // file keeps it. true if it was stamped now.
+  bool MarcarUso(const Clave& clave);
   size_t size() const { return entradas_.size(); }
   const std::map<Clave, std::vector<uint8_t>>& entradas() const { return entradas_; }
 
  private:
   std::map<Clave, std::vector<uint8_t>> entradas_;
   std::vector<Clave> nuevas_;  // added since the last SerializarNuevas
+  std::vector<Clave> usos_;    // stamped by MarcarUso since then
+  std::map<Clave, uint32_t> sales_;  // each entry's stamp (FijarSalCache); 0 = made without one
 };
 
 }  // namespace rex::deko3d

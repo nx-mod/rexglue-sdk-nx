@@ -1063,6 +1063,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
   };
   if (const std::vector<uint8_t>* dksh = cache_.Buscar(clave_cache)) {
     ++aciertos_cache_;
+    cache_sucia_ |= cache_.MarcarUso(clave_cache);  // kept by the file's next writing (FijarSalCache)
     return cargar(*dksh);
   }
   static const bool en_fondo = REXCVAR_GET(nfsmw_dk_compilar_en_fondo);
