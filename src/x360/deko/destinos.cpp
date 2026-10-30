@@ -941,6 +941,7 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
 }
 
 bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
+  const MotivoMs motivo(ms_motivo_, 4);
   const uint32_t base = r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF;
   const uint32_t superficie = r[gr::XE_GPU_REG_RB_SURFACE_INFO];
   const uint32_t msaa = (superficie >> 16) & 0x3;  // 0 = 1x, 1 = 2x, 2 = 4x
@@ -948,8 +949,21 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
   const uint32_t pitch_color = (superficie & 0x3FFF) * por_x;
   ImagenDk* imagenes[4] = {};
   uint32_t n = 0;
+  // Of a 32-bit base's 8-bit and float images only the one holding its content (propietario_): the other gets it
+  // carried over when it is next bound (DestinoColor). Clearing every image there, each one whole, cost 6 ms a frame
+  // in Halo 3's menu.
+  uint64_t propietaria = 0;
+  if (const auto p = propietario_.find((uint64_t(base) << 20) | pitch_color); p != propietario_.end()) {
+    if (const auto o = destinos_.find(p->second); o != destinos_.end() && o->second.viva) {
+      propietaria = p->second;
+    }
+  }
   for (auto& [clave, imagen] : destinos_) {
     if (imagen.viva && imagen.edram_base == base && imagen.edram_pitch == pitch_color && n < 4) {
+      if (propietaria && !imagen.edram_64 && clave != propietaria) {
+        ++borrados_rapidos_ajenos_;
+        continue;
+      }
       imagenes[n++] = &imagen;
     }
   }
@@ -1064,6 +1078,7 @@ void RenderDk::MarcarBaldosas(const ImagenDk& imagen, uint32_t y0, uint32_t y1) 
 }
 
 void RenderDk::TraerBaldosas(ImagenDk& imagen, uint32_t filas) {
+  const MotivoMs motivo(ms_motivo_, 2);
   static const bool con_baldosas = REXCVAR_GET(deko_edram_baldosas);
   constexpr uint32_t kBaldosas = 2048;
   if (!con_baldosas || !imagen.clave_edram) {
@@ -1475,6 +1490,7 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
 // in the new format (the H3Recomp PC port's CarryOver, as facts): a 7e3 drawing read as an 8-bit format is its 7e3
 // bits; 7e3 bits read as 7e3 are their value again; anything else is the value. The rows the game has used.
 void RenderDk::LlevarContenido(ImagenDk& origen, ImagenDk& destino, uint32_t formato_destino) {
+  const MotivoMs motivo(ms_motivo_, 1);
   const bool origen_flotante = origen.formato == DkImageFormat_RGBA16_Float;
   const bool destino_flotante = destino.formato == DkImageFormat_RGBA16_Float;
   const bool origen_7e3 = origen.formato_dibujo == 3 || origen.formato_dibujo == 12;
@@ -1782,6 +1798,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
   // What a 4x pass drew there is read from its companion by the resolve (Copiar3D), or unpacked before anything else
   // reads or writes the sample-space image (TraerBaldosas, a pending clear, the band: EscribirMuestras).
+  const MotivoMs motivo(ms_motivo_, 3);
   if (!destino_render) {
     return false;
   }
@@ -2013,6 +2030,7 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
   if (!destino.borrado_pendiente) {
     return;
   }
+  const MotivoMs motivo(ms_motivo_, 5);
   AntesDeCambiarDestino(&destino);
   if (!DescartarMuestras(destino, destino.ancho, AltoDeBorrado(destino))) {  // the clear covers whole rows
     EscribirMuestras(destino);
@@ -2064,6 +2082,7 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
 }
 
 void RenderDk::CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, uint32_t i) {
+  const MotivoMs motivo(ms_motivo_, 6);
   hasta = std::min(hasta, destino.alto);
   if (hasta > destino.alto_usado) {
     destino.alto_usado = hasta;
@@ -3194,6 +3213,7 @@ void RenderDk::EmpaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas) {
   DibujarRectanguloMs(true, muestras.profundidad, muestras.profundidad ? fs_ms_z_ : fs_ms_color_, ranura, ranura2,
                       ms.ancho, std::min(ms.alto, (filas + 1) / 2));
   ++ms_empaquetados_;
+  ++ms_empaquetados_por_[muestras.s_motivo & 7];
 }
 
 void RenderDk::DesempaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas) {
@@ -3214,6 +3234,7 @@ void RenderDk::DesempaquetarMs(ImagenDk& muestras, ImagenDk& ms, uint32_t filas)
   DibujarRectanguloMs(false, muestras.profundidad, muestras.profundidad ? fs_desms_z_ : fs_desms_color_, ranura,
                       ranura2, muestras.ancho, std::min(muestras.alto, filas));
   ++ms_desempaquetados_;
+  ++ms_desempaquetados_por_[ms_motivo_ & 7];
 }
 
 void RenderDk::CerrarPaseMs() {
@@ -3251,6 +3272,7 @@ void RenderDk::LeerMuestras(ImagenDk& imagen) {
 void RenderDk::EscribirMuestras(ImagenDk& imagen) {
   LeerMuestras(imagen);
   imagen.s_nueva = true;
+  imagen.s_motivo = ms_motivo_;
 }
 
 bool RenderDk::DescartarMuestras(ImagenDk& imagen, uint32_t ancho, uint32_t filas) {
@@ -3567,6 +3589,30 @@ void RenderDk::InformePeriodico() {
                "resolves y {} borrados rapidos sobre la companera en total",
                ms_pases_, ms_empaquetados_, ms_desempaquetados_, ms_descartados_, ms_resueltas_directas_,
                ms_borrados_directos_);
+  {
+    // Why the companions went back and forth: unpacked (and, for packs, what wrote the sample-space image) per cause.
+    static const char* const kMotivos[8] = {"otro", "llevar contenido", "baldosas", "resolve", "borrado rapido",
+                                            "borrado pendiente", "banda", "pase 1x"};
+    std::string por;
+    for (uint32_t i = 0; i < 8; ++i) {
+      const uint64_t d = ms_desempaquetados_por_[i] - informe_ms_desempaquetados_por_[i];
+      const uint64_t e = ms_empaquetados_por_[i] - informe_ms_empaquetados_por_[i];
+      if (d || e) {
+        por += fmt::format(", {} {:.1f}/{:.1f}", kMotivos[i], double(d) / fotogramas, double(e) / fotogramas);
+      }
+      informe_ms_desempaquetados_por_[i] = ms_desempaquetados_por_[i];
+      informe_ms_empaquetados_por_[i] = ms_empaquetados_por_[i];
+    }
+    X360_INFORME("[deko3d] 4x por fotograma (desempaquetados/empaquetados) por causa{}; borrados rapidos de otra "
+                 "familia saltados {:.1f}; contenidos llevados {:.1f}, baldosas traidas {:.1f}",
+                 por.empty() ? std::string(": ninguno") : por,
+                 double(borrados_rapidos_ajenos_ - informe_borrados_rapidos_ajenos_) / fotogramas,
+                 double(contenidos_llevados_ - informe_contenidos_llevados_) / fotogramas,
+                 double(baldosas_traidas_ - informe_baldosas_traidas_) / fotogramas);
+    informe_borrados_rapidos_ajenos_ = borrados_rapidos_ajenos_;
+    informe_contenidos_llevados_ = contenidos_llevados_;
+    informe_baldosas_traidas_ = baldosas_traidas_;
+  }
   X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
                "sus flujos; {} registros en total, {} veces sin sitio, {} esperas",
                double(export_dibujos_ - informe_export_dibujos_) / fotogramas,

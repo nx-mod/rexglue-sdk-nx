@@ -801,8 +801,10 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
     // Drawn in sample space: what a 4x pass left in a companion comes back first, and this image is the newer copy.
     for (ImagenDk* im : imagenes) {
       if (im) {
+        const MotivoMs motivo(ms_motivo_, 7);
         LeerMuestras(*im);
         im->s_nueva = true;
+        im->s_motivo = 7;
       }
     }
   }

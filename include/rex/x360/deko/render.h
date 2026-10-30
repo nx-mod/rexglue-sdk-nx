@@ -112,6 +112,7 @@ struct ImagenDk {
   bool s_nueva = true;
   bool ms_nueva = false;
   uint32_t ms_filas = 0;
+  uint8_t s_motivo = 0;  // diagnostic: what last wrote this image in sample space (RenderDk::ms_motivo_)
 };
 
 // A texture the game reads from its memory, with what decides when to look at its bytes again.
@@ -489,6 +490,18 @@ class RenderDk final : public DestinosNativos {
   bool fs_ms_validos_ = false;
   uint64_t ms_empaquetados_ = 0, ms_desempaquetados_ = 0, ms_pases_ = 0, ms_descartados_ = 0;
   uint64_t ms_resueltas_directas_ = 0, ms_borrados_directos_ = 0;  // read or cleared on the companion, no unpack
+  // Diagnostic: the cause of each unpack and pack (set by the caller for its duration).
+  struct MotivoMs {
+    uint8_t& m;
+    uint8_t antes;
+    MotivoMs(uint8_t& m, uint8_t v) : m(m), antes(m) { m = v; }
+    ~MotivoMs() { m = antes; }
+  };
+  uint8_t ms_motivo_ = 0;
+  uint64_t ms_desempaquetados_por_[8]{}, ms_empaquetados_por_[8]{};
+  uint64_t informe_ms_desempaquetados_por_[8]{}, informe_ms_empaquetados_por_[8]{};
+  uint64_t borrados_rapidos_ajenos_ = 0, informe_borrados_rapidos_ajenos_ = 0;
+  uint64_t informe_contenidos_llevados_ = 0, informe_baldosas_traidas_ = 0;
   DkShader fs_copia_color_ms_{};  // kFsCopiaColor from a 4x companion
   bool fs_copia_color_ms_valido_ = false;
   void ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad);
