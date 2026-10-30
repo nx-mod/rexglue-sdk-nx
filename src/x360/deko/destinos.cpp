@@ -372,7 +372,11 @@ void main() {
 // holds the bits), with Xenia's conversion (spirv_translator_rb.cpp, PreClampedFloat32To7e3: round to nearest even);
 // alpha is the format's 2 bits. Then, in both modes, the copy's 2^exp_bias (RB_COPY_DEST_INFO), as Xenia's resolve.
 constexpr const char* kFsCopiaColor = R"(#version 460
+#ifdef ORIGEN_MS
+layout(binding = 0) uniform sampler2DMS origen;  // a 4x companion (CompaneraMs), read where it is the newer copy
+#else
 layout(binding = 0) uniform sampler2D origen;
+#endif
 layout(std140, binding = 0) uniform Copia {
   ivec4 desplazamiento;
   ivec4 modo;
@@ -406,9 +410,16 @@ void main() {
   if (copia.desplazamiento.z > 1) {
     // A 4x MSAA resolve: the pixel's 2x2 samples averaged (xy: the source's sample-space origin, w: the destination's
     // origin, x in the low 16 bits).
+#ifdef ORIGEN_MS
+    // From the companion: xy is its pixel origin, the pixel's four samples are the 2x2.
+    ivec2 s = p - ivec2(copia.desplazamiento.w & 0xFFFF, copia.desplazamiento.w >> 16) + copia.desplazamiento.xy;
+    v = (texelFetch(origen, s, 0) + texelFetch(origen, s, 1) + texelFetch(origen, s, 2) + texelFetch(origen, s, 3)) *
+        0.25;
+#else
     ivec2 s = (p - ivec2(copia.desplazamiento.w & 0xFFFF, copia.desplazamiento.w >> 16)) * 2 + copia.desplazamiento.xy;
     v = (texelFetch(origen, s, 0) + texelFetch(origen, s + ivec2(1, 0), 0) + texelFetch(origen, s + ivec2(0, 1), 0) +
          texelFetch(origen, s + ivec2(1, 1), 0)) * 0.25;
+#endif
   } else {
     v = texelFetch(origen, p + copia.desplazamiento.xy, 0);
   }
@@ -826,7 +837,20 @@ void RenderDk::AntesDe3D() {
 
 bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
                         ImagenDk& destino, uint32_t dx, uint32_t dy, int32_t modo, float escala, uint32_t muestras) {
-  LeerMuestras(const_cast<ImagenDk&>(origen));
+  // A 4x resolve whose rows the companion holds newer (a 4x pass drew them): read there, not unpacked first. Halo 3's
+  // menu resolves each tile after drawing it; each one unpacked every row drawn so far (about 36 a frame).
+  const ImagenDk* ms_origen = nullptr;
+  if (muestras > 1 && !destino.profundidad && fs_copia_color_ms_valido_ && origen.ms_nueva &&
+      y0 + alto * muestras <= origen.ms_filas) {
+    auto it = ms_de_.find(origen.serie);
+    if (it != ms_de_.end() && it->second.viva) {
+      ms_origen = &it->second;
+      ++ms_resueltas_directas_;
+    }
+  }
+  if (!ms_origen) {
+    LeerMuestras(const_cast<ImagenDk&>(origen));
+  }
   EscribirMuestras(destino);
   const bool z = destino.profundidad;
   if (!vs_salida_valido_ || !(z ? fs_copia_profundidad_valido_ : fs_copia_color_valido_)) {
@@ -840,15 +864,16 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   }
   // Color from a 4x surface (muestras > 1) averages each pixel's samples: the shader takes both origins.
   const bool promedio = !z && muestras > 1;
-  const int32_t desplazamiento[4] = {promedio ? int32_t(x0) : int32_t(x0) - int32_t(dx),
-                                     promedio ? int32_t(y0) : int32_t(y0) - int32_t(dy), int32_t(muestras),
+  const int32_t desplazamiento[4] = {promedio ? int32_t(ms_origen ? x0 / 2 : x0) : int32_t(x0) - int32_t(dx),
+                                     promedio ? int32_t(ms_origen ? y0 / 2 : y0) : int32_t(y0) - int32_t(dy),
+                                     int32_t(muestras),
                                      promedio ? int32_t(dx | (dy << 16)) : 0};
   const int32_t modos[4] = {modo, 0, 0, 0};
   const float escalas[4] = {escala, 0.0f, 0.0f, 0.0f};
   std::memcpy(ubo.cpu, desplazamiento, sizeof(desplazamiento));
   std::memcpy(ubo.cpu + 16, modos, sizeof(modos));
   std::memcpy(ubo.cpu + 32, escalas, sizeof(escalas));
-  const uint32_t ranura = VistaDe(origen, 0x688, z ? 0 /* RRRR */ : 0x688);
+  const uint32_t ranura = ms_origen ? VistaDe(*ms_origen, 0x688, 0x688) : VistaDe(origen, 0x688, z ? 0 /* RRRR */ : 0x688);
   DkCmdBuf cmd = nucleo_.comandos();
   MarcarGpu(kGpuCopias);
   if (transferencia_sin_barrera_) {
@@ -902,7 +927,8 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
   dkCmdBufBindDepthStencilState(cmd, &ds);
   dkCmdBufBindVtxAttribState(cmd, nullptr, 0);
   dkCmdBufBindVtxBufferState(cmd, nullptr, 0);
-  const DkShader* shaders[2] = {&vs_salida_, z ? &fs_copia_profundidad_ : &fs_copia_color_};
+  const DkShader* shaders[2] = {&vs_salida_,
+                                z ? &fs_copia_profundidad_ : ms_origen ? &fs_copia_color_ms_ : &fs_copia_color_};
   dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
   dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 0, ubo.gpu, 256);
   dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
@@ -970,12 +996,23 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
         cubre_y = std::max(cubre_y, uint32_t(std::max(0.0f, std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f))) * por_y);
       }
     }
-    if (!DescartarMuestras(imagen, cubre_x, cubre_y)) {
+    HacerBorradoPendiente(imagen);
+    // A 4x surface whose companion holds the newer copy (a 4x pass drew it): cleared there, its rows still the
+    // companion's. Unpacking it first, then the next 4x pass packing it back, cost 8 ms a frame in Halo 3's menu,
+    // which clears every tile before drawing it.
+    ImagenDk* ms = nullptr;
+    if (por_x == 2 && por_y == 2 && imagen.ms_nueva) {
+      auto it = ms_de_.find(imagen.serie);
+      if (it != ms_de_.end() && it->second.viva) {
+        ms = &it->second;
+        ++ms_borrados_directos_;
+      }
+    }
+    if (!ms && !DescartarMuestras(imagen, cubre_x, cubre_y)) {
       EscribirMuestras(imagen);
     }
-    HacerBorradoPendiente(imagen);
     DkImageView vista;
-    dkImageViewDefaults(&vista, &imagen.imagen);
+    dkImageViewDefaults(&vista, ms ? &ms->imagen : &imagen.imagen);
     dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
     for (uint32_t v = 0; v + 2 < cuenta; v += 3) {
       // A rectangle's corners sit on pixel edges; the surface's pixels are por_x x por_y of the buffer's.
@@ -992,10 +1029,16 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
       if (x1 <= x0 || y1 <= y0) {
         continue;
       }
-      const DkScissor tijera = {uint32_t(x0), uint32_t(y0), uint32_t(x1 - x0), uint32_t(y1 - y0)};
+      // The companion is at pixel size: half the sample-space rectangle (even, as a 4x surface's are).
+      const DkScissor tijera = ms ? DkScissor{uint32_t(x0) / 2, uint32_t(y0) / 2, uint32_t(x1 - x0) / 2,
+                                              uint32_t(y1 - y0) / 2}
+                                  : DkScissor{uint32_t(x0), uint32_t(y0), uint32_t(x1 - x0), uint32_t(y1 - y0)};
       dkCmdBufSetScissors(cmd, 0, &tijera, 1);
       dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
       imagen.alto_usado = std::max(imagen.alto_usado, uint32_t(y1));
+      if (ms) {
+        imagen.ms_filas = std::max(imagen.ms_filas, uint32_t(y1));  // unpacked with the rest when read
+      }
     }
     std::memcpy(imagen.borrado_color, color, sizeof(color));
   }
@@ -1737,9 +1780,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
   // A 4x MSAA surface's pixels are 2x2 samples of the image at twice the pitch (Dibujar): the rectangle is in pixels.
   const uint32_t muestras = ((reg.rb_surface_info >> 16) & 0x3) == 2 ? 2 : 1;
   ImagenDk* destino_render = DestinoColor(info_color & 0xFFF, formato_color, pitch * muestras, true);
-  if (destino_render) {
-    LeerMuestras(*destino_render);  // what a 4x pass drew there, back in sample space for the resolve
-  }
+  // What a 4x pass drew there is read from its companion by the resolve (Copiar3D), or unpacked before anything else
+  // reads or writes the sample-space image (TraerBaldosas, a pending clear, the band: EscribirMuestras).
   if (!destino_render) {
     return false;
   }
@@ -1835,6 +1877,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
           // On the 3D engine (a fragment barrier, not the copy engine's full one: 8 of them a menu frame), with the
           // copy's 7e3 handling and exponent bias as any other resolve. The linear blit only if that cannot be done.
           if (!Copiar3D(*destino_render, fx0, fy0, w, h, resuelta->imagen, dx, dy, modo_copia, escala, muestras)) {
+            LeerMuestras(*destino_render);
             MarcarGpu(kGpuCopias);
             AntesDeTransferir();
             const DkImageView origen_vista = VistaCompleta(destino_render->imagen);
@@ -2674,6 +2717,15 @@ bool RenderDk::CrearShadersSalida() {
   }
   const deko::Compilador::Resultado color = compilador_.Compilar(false, kFsCopiaColor);
   fs_copia_color_valido_ = color.ok && nucleo_.CargarShader(fs_copia_color_, color.dksh, "copia de color");
+  {
+    std::string fuente = kFsCopiaColor;
+    fuente.insert(fuente.find('\n') + 1, "#define ORIGEN_MS 1\n");
+    const deko::Compilador::Resultado ms = compilador_.Compilar(false, fuente);
+    fs_copia_color_ms_valido_ = ms.ok && nucleo_.CargarShader(fs_copia_color_ms_, ms.dksh, "copia de color desde 4x");
+    if (!fs_copia_color_ms_valido_) {
+      REXLOG_WARN("[deko3d] sin resolve desde la companera 4x ({}): se desempaqueta antes", ms.log);
+    }
+  }
   const deko::Compilador::Resultado z = compilador_.Compilar(false, kFsCopiaProfundidad);
   fs_copia_profundidad_valido_ = z.ok && nucleo_.CargarShader(fs_copia_profundidad_, z.dksh, "copia de profundidad");
   if (!fs_copia_color_valido_ || !fs_copia_profundidad_valido_) {
@@ -3511,8 +3563,10 @@ void RenderDk::InformePeriodico() {
       "[deko3d] por fotograma, borrados por tipo: al empezar un pase {:.2f} ms, rapidos de D3D {:.2f}, estencil "
       "restaurado {:.2f}, destinos nuevos {:.2f}, pendientes {:.2f}, bandas {:.2f}",
       ms_borrado(0), ms_borrado(1), ms_borrado(2), ms_borrado(3), ms_borrado(4), ms_borrado(5));
-  X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados, {} descartados por un borrado en total",
-               ms_pases_, ms_empaquetados_, ms_desempaquetados_, ms_descartados_);
+  X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados, {} descartados por un borrado, {} "
+               "resolves y {} borrados rapidos sobre la companera en total",
+               ms_pases_, ms_empaquetados_, ms_desempaquetados_, ms_descartados_, ms_resueltas_directas_,
+               ms_borrados_directos_);
   X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
                "sus flujos; {} registros en total, {} veces sin sitio, {} esperas",
                double(export_dibujos_ - informe_export_dibujos_) / fotogramas,
