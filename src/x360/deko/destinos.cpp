@@ -662,7 +662,7 @@ void RenderDk::AsegurarTrabajo() {
   descriptores_libres_.insert(descriptores_libres_.end(), libres.begin(), libres.end());
   libres.clear();
   EscribirLecturas(uint32_t(trabajo_ % kRanuras));
-  AplicarExportaciones(uint32_t(trabajo_ % kRanuras));  // its fence has been waited for: the records are written
+  AplicarExportaciones(uint32_t(trabajo_ % kRanuras), false);  // its fence was waited for: the records are written
   export_ranuras_[trabajo_ % kRanuras].trabajo = trabajo_;
   export_ranuras_[trabajo_ % kRanuras].fotograma = fotograma_;
   if (!pasos_.empty()) {
@@ -2996,7 +2996,7 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
   for (uint32_t i = 0; i < kRanuras; ++i) {
     const ExportRanura& er = export_ranuras_[i];
     if (!er.regiones.empty() && er.trabajo != trabajo_ && nucleo_.TrabajoTerminado(er.trabajo)) {
-      AplicarExportaciones(i);
+      AplicarExportaciones(i, false);
     }
   }
   ++fotograma_;
@@ -3304,15 +3304,18 @@ void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
     if (elegida < 0) {
       return;
     }
-    // (A partial submit of this work before waiting, to keep the GPU busy, faulted the GPU queue on the console in
-    // build BE: not done.)
-    nucleo_.EsperarTrabajo(export_ranuras_[elegida].trabajo, trabajo_);
-    AplicarExportaciones(uint32_t(elegida));
+    // Only when the GPU has already done it: waiting stopped the CPU once a frame until the GPU finished the
+    // previous frame, with nothing of this frame queued (35-70 ms a frame of an idle GPU in Halo 3's game; a partial
+    // submit before the wait faulted the GPU queue). Not done yet: this frame reads the state before it.
+    if (!nucleo_.TrabajoTerminado(export_ranuras_[elegida].trabajo)) {
+      return;
+    }
+    AplicarExportaciones(uint32_t(elegida), true);
     ++export_esperas_;
   }
 }
 
-void RenderDk::AplicarExportaciones(uint32_t ranura) {
+void RenderDk::AplicarExportaciones(uint32_t ranura, bool en_medio) {
   ExportRanura& er = export_ranuras_[ranura];
   if (er.regiones.empty()) {
     er.usados = 0;
@@ -3327,13 +3330,7 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
     const uint32_t* d = base + region.dword;
     const uint32_t n = std::min(d[0], region.capacidad);
     export_registros_ += d[0];
-    if (n) {
-      escrito = true;
-      for (uint32_t f = 0; f < region.n_flujos; ++f) {
-        exportados_.push_back(
-            {region.flujos[f].first, region.flujos[f].first + region.flujos[f].second, fotograma_, export_serie_ + 1});
-      }
-    }
+    uint32_t desde = UINT32_MAX, hasta = 0;  // what its records really wrote
     for (uint32_t i = 0; i < n; ++i) {
       const uint32_t direccion = d[2 + i * 2], valor = d[3 + i * 2];
       bool dentro = false;
@@ -3346,13 +3343,22 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
       }
       std::memcpy(memoria_->TranslatePhysical(direccion), &valor, 4);  // already in guest byte order
       ++export_escritos_;
+      desde = std::min(desde, direccion);
+      hasta = std::max(hasta, direccion + 4);
+    }
+    if (hasta > desde) {
+      escrito = true;
+      exportados_.push_back({desde, hasta, fotograma_, export_serie_ + 1});
     }
   }
   er.regiones.clear();
   er.usados = 0;
   er.minimo = UINT32_MAX;
   er.maximo = 0;
-  geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch
+  if (en_medio && escrito) {
+    geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch (new works and frames start a
+                           // new epoch anyway)
+  }
   if (escrito) {
     ++export_serie_;
     // The draws' per-fetch texture cache asks again only when an exported range lies under a texture (PrepararTextura

@@ -489,7 +489,7 @@ class RenderDk final : public DestinosNativos {
   bool fs_ms_validos_ = false;
   uint64_t ms_empaquetados_ = 0, ms_desempaquetados_ = 0, ms_pases_ = 0, ms_descartados_ = 0;
   void ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad);
-  void AplicarExportaciones(uint32_t ranura);
+  void AplicarExportaciones(uint32_t ranura, bool en_medio);  // en_medio: inside a work (the geometry store forgets)
   DkMemBlock export_bloque_ = nullptr;
   uint32_t* export_cpu_ = nullptr;
   DkGpuAddr export_gpu_ = 0;
