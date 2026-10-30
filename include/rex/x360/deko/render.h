@@ -456,6 +456,7 @@ class RenderDk final : public DestinosNativos {
     uint32_t usados = 0;     // dwords
     uint64_t trabajo = 0;    // the work that wrote them
     uint64_t fotograma = 0;  // the frame that work belongs to
+    uint32_t minimo = UINT32_MAX, maximo = 0;  // the guest bytes all its regions' streams span (a quick no)
   };
   // A draw about to read guest memory that an earlier frame's exports are still writing (not applied yet): waits for
   // that work and applies them, oldest first (the H3Recomp PC port's SyncMemExportsFor). This frame's own exports are
@@ -473,6 +474,9 @@ class RenderDk final : public DestinosNativos {
   void CerrarPaseMs();
   void LeerMuestras(ImagenDk& imagen);     // before reading it outside a 4x pass
   void EscribirMuestras(ImagenDk& imagen);  // before writing it outside a 4x pass (a partial write keeps the rest)
+  // Before a write that covers what the 4x pass drew (ancho x filas from the top left): the companion's content is
+  // dropped, not unpacked. false: not covered, call EscribirMuestras.
+  bool DescartarMuestras(ImagenDk& imagen, uint32_t ancho, uint32_t filas);
   void TerminarPase() {
     EmitirCieloPendiente();  // the deferred sky draws in the pass, before its targets go back to sample space
     CerrarPaseMs();
@@ -483,7 +487,7 @@ class RenderDk final : public DestinosNativos {
   bool ms_activo_ = false;
   DkShader fs_ms_color_{}, fs_ms_z_{}, fs_desms_color_{}, fs_desms_z_{};
   bool fs_ms_validos_ = false;
-  uint64_t ms_empaquetados_ = 0, ms_desempaquetados_ = 0, ms_pases_ = 0;
+  uint64_t ms_empaquetados_ = 0, ms_desempaquetados_ = 0, ms_pases_ = 0, ms_descartados_ = 0;
   void ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_t& dword, uint32_t& capacidad);
   void AplicarExportaciones(uint32_t ranura);
   DkMemBlock export_bloque_ = nullptr;

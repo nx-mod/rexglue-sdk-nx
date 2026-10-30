@@ -960,7 +960,19 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
   MarcarGpu(kGpuSubBorradoRapido);
   for (uint32_t i = 0; i < n; ++i) {
     ImagenDk& imagen = *imagenes[i];
-    EscribirMuestras(imagen);
+    uint32_t cubre_x = 0, cubre_y = 0;  // the largest rectangle from (0, 0)
+    for (uint32_t v = 0; v + 2 < cuenta; v += 3) {
+      const float xs[3] = {valor(v * kZancada), valor((v + 1) * kZancada), valor((v + 2) * kZancada)};
+      const float ys[3] = {valor(v * kZancada + 1), valor((v + 1) * kZancada + 1), valor((v + 2) * kZancada + 1)};
+      if (std::floor(std::min({xs[0], xs[1], xs[2]}) + 0.5f) <= 0.0f &&
+          std::floor(std::min({ys[0], ys[1], ys[2]}) + 0.5f) <= 0.0f) {
+        cubre_x = std::max(cubre_x, uint32_t(std::max(0.0f, std::floor(std::max({xs[0], xs[1], xs[2]}) + 0.5f))) * por_x);
+        cubre_y = std::max(cubre_y, uint32_t(std::max(0.0f, std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f))) * por_y);
+      }
+    }
+    if (!DescartarMuestras(imagen, cubre_x, cubre_y)) {
+      EscribirMuestras(imagen);
+    }
     HacerBorradoPendiente(imagen);
     DkImageView vista;
     dkImageViewDefaults(&vista, &imagen.imagen);
@@ -1959,7 +1971,9 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
     return;
   }
   AntesDeCambiarDestino(&destino);
-  EscribirMuestras(destino);
+  if (!DescartarMuestras(destino, destino.ancho, AltoDeBorrado(destino))) {  // the clear covers whole rows
+    EscribirMuestras(destino);
+  }
   destino.borrado_pendiente = false;
   AsegurarTrabajo();
   TerminarPase();
@@ -3187,6 +3201,20 @@ void RenderDk::EscribirMuestras(ImagenDk& imagen) {
   imagen.s_nueva = true;
 }
 
+bool RenderDk::DescartarMuestras(ImagenDk& imagen, uint32_t ancho, uint32_t filas) {
+  // A write over everything the 4x pass drew (from the top left, its rows, the width bar the padding past the
+  // viewport, under one EDRAM tile): what the companion holds is lost anyway, so it is not unpacked first. Halo 3's
+  // menu clears its targets about 24 times a frame, each one an unpack before.
+  if (!imagen.ms_nueva || filas < imagen.ms_filas || ancho + 80 < imagen.ancho) {
+    return false;
+  }
+  imagen.ms_nueva = false;
+  imagen.ms_filas = 0;
+  imagen.s_nueva = true;
+  ++ms_descartados_;
+  return true;
+}
+
 // ---- Memory export (rex/x360/deko/render.h)
 
 namespace {
@@ -3243,6 +3271,10 @@ void RenderDk::ReservarExportacion(const uint32_t* r, uint32_t vertices, uint32_
   er.usados += 2 + region.capacidad * 2;
   dword = region.dword;
   capacidad = region.capacidad;
+  for (uint32_t f = 0; f < region.n_flujos; ++f) {
+    er.minimo = std::min(er.minimo, region.flujos[f].first);
+    er.maximo = std::max(er.maximo, region.flujos[f].first + region.flujos[f].second);
+  }
   er.regiones.push_back(region);
   ++export_dibujos_;
   dkCmdBufBindStorageBuffer(nucleo_.comandos(), DkStage_Vertex, 15,
@@ -3257,8 +3289,9 @@ void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
     for (uint32_t i = 0; i < kRanuras; ++i) {
       const ExportRanura& er = export_ranuras_[i];
       if (er.regiones.empty() || er.fotograma >= fotograma_ || er.trabajo == trabajo_ ||
-          (elegida >= 0 && er.trabajo >= export_ranuras_[elegida].trabajo)) {
-        continue;
+          (elegida >= 0 && er.trabajo >= export_ranuras_[elegida].trabajo) || fin <= er.minimo ||
+          inicio >= er.maximo) {
+        continue;  // most reads: nowhere near what this slot's exports write
       }
       for (const RegionExport& region : er.regiones) {
         for (uint32_t f = 0; f < region.n_flujos; ++f) {
@@ -3271,12 +3304,8 @@ void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
     if (elegida < 0) {
       return;
     }
-    // What this work has recorded so far goes to the GPU first: waiting with it unsent left the GPU idle until the
-    // frame was closed (about 30 ms a frame, one wait a frame in Halo 3's game).
-    if (!nucleo_.TrabajoTerminado(export_ranuras_[elegida].trabajo) && nucleo_.TrabajoAbierto()) {
-      nucleo_.EnviarParcial();
-      ++envios_parciales_;
-    }
+    // (A partial submit of this work before waiting, to keep the GPU busy, faulted the GPU queue on the console in
+    // build BE: not done.)
     nucleo_.EsperarTrabajo(export_ranuras_[elegida].trabajo, trabajo_);
     AplicarExportaciones(uint32_t(elegida));
     ++export_esperas_;
@@ -3321,6 +3350,8 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
   }
   er.regiones.clear();
   er.usados = 0;
+  er.minimo = UINT32_MAX;
+  er.maximo = 0;
   geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch
   if (escrito) {
     ++export_serie_;
@@ -3474,8 +3505,8 @@ void RenderDk::InformePeriodico() {
       "[deko3d] por fotograma, borrados por tipo: al empezar un pase {:.2f} ms, rapidos de D3D {:.2f}, estencil "
       "restaurado {:.2f}, destinos nuevos {:.2f}, pendientes {:.2f}, bandas {:.2f}",
       ms_borrado(0), ms_borrado(1), ms_borrado(2), ms_borrado(3), ms_borrado(4), ms_borrado(5));
-  X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados en total", ms_pases_, ms_empaquetados_,
-               ms_desempaquetados_);
+  X360_INFORME("[deko3d] 4x real: {} pases, {} empaquetados, {} desempaquetados, {} descartados por un borrado en total",
+               ms_pases_, ms_empaquetados_, ms_desempaquetados_, ms_descartados_);
   X360_INFORME("[deko3d] exportacion a memoria por fotograma: {:.1f} dibujos, {:.0f} dwords escritos, {:.0f} fuera de "
                "sus flujos; {} registros en total, {} veces sin sitio, {} esperas",
                double(export_dibujos_ - informe_export_dibujos_) / fotogramas,
