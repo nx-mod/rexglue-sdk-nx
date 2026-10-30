@@ -497,6 +497,15 @@ class RenderDk final : public DestinosNativos {
     uint64_t fotograma, serie;
   };
   std::vector<RangoExportado> exportados_;
+  // Read-backs of small resolves (LeerResuelta): copied on the 3D engine into an image of their own when they happen,
+  // and to the read-back buffer all together when the work closes, in one copy engine phase: one transfer barrier a
+  // work instead of two per read-back (Halo 3 reads about 8 a frame back: 16 full GPU drains).
+  struct LecturaAplazada {
+    ImagenDk imagen;
+    DkCopyBuf destino;
+    uint32_t ancho, alto;
+  };
+  std::vector<LecturaAplazada> lecturas_aplazadas_;
   uint64_t export_serie_ = 0;  // goes up each time records are written
   uint64_t export_dibujos_ = 0, export_registros_ = 0, export_escritos_ = 0, export_fuera_ = 0, export_llenos_ = 0;
   uint64_t export_esperas_ = 0;

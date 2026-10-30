@@ -698,6 +698,17 @@ void RenderDk::CerrarTrabajo() {
     return;
   }
   TerminarPase();  // the deferred sky belongs to this work's pass
+  // The work's read-backs, from their images to the buffer in one copy engine phase (LeerResuelta).
+  if (!lecturas_aplazadas_.empty()) {
+    AntesDeTransferir();
+    for (LecturaAplazada& l : lecturas_aplazadas_) {
+      const DkImageView vista = VistaCompleta(l.imagen.imagen);
+      const DkImageRect rect = {0, 0, 0, l.ancho, l.alto, 1};
+      dkCmdBufCopyImageToBuffer(nucleo_.comandos(), &vista, &rect, &l.destino, 0);
+      DestruirImagen(l.imagen);  // its memory is given back after this work's fence
+    }
+    lecturas_aplazadas_.clear();
+  }
   // The fence is released by the 3D engine: a transfer still running on the copy engine is waited for first (the
   // read-backs are read when the fence has passed).
   if (transferencia_sin_barrera_) {
@@ -1849,7 +1860,7 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
         // Different host formats (a float target to an 8-bit texture or back) only on the 3D engine or the blit:
         // the copy engine moves bytes.
         const bool mismo_formato = destino_render->formato == resuelta->imagen.formato;
-        if ((!transforma && (encoger || (se_lee && mismo_formato))) ||
+        if ((!transforma && encoger) ||
             !Copiar3D(*destino_render, uint32_t(x0), uint32_t(y0), ancho, alto, resuelta->imagen, dx, dy, modo_copia,
                       escala)) {
           MarcarGpu(kGpuCopias);
@@ -2430,9 +2441,24 @@ void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, i
   const DkImageView vista = VistaCompleta(imagen.imagen);
   const DkImageRect rect = {dx, dy, 0, ancho, alto, 1};
   const DkCopyBuf destino = {lectura_gpu_ + offset, ancho * bytes_texel, ancho * bytes_texel * alto};
-  // A transfer like the resolve: the copy engine runs them in order, and CerrarTrabajo waits for it before the fence.
-  AntesDeTransferir();
-  dkCmdBufCopyImageToBuffer(nucleo_.comandos(), &vista, &rect, &destino, 0);
+  // Into an image of its own on the 3D engine now (what the resolve wrote may be written again in this work), to the
+  // buffer when the work closes (CerrarTrabajo), with the work's other read-backs.
+  LecturaAplazada aplazada{};
+  if (CrearImagen(aplazada.imagen, DkImageType_2D, imagen.formato, ancho, alto, 1, 1,
+                  DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine, "lectura de vuelta") &&
+      Copiar3D(imagen, dx, dy, ancho, alto, aplazada.imagen, 0, 0)) {
+    aplazada.destino = destino;
+    aplazada.ancho = ancho;
+    aplazada.alto = alto;
+    lecturas_aplazadas_.push_back(aplazada);
+  } else {
+    if (aplazada.imagen.viva) {
+      DestruirImagen(aplazada.imagen);
+    }
+    // A transfer like the resolve: the copy engine runs them in order, and CerrarTrabajo waits for it before the fence.
+    AntesDeTransferir();
+    dkCmdBufCopyImageToBuffer(nucleo_.comandos(), &vista, &rect, &destino, 0);
+  }
   l.pendientes.push_back({offset, reg.rb_copy_dest_base, x0, y0, ancho, alto, reg.rb_copy_dest_pitch & 0x3FFF,
                           (reg.rb_copy_dest_pitch >> 16) & 0x3FFF, reg.rb_copy_dest_info, bytes_texel});
   if (lecturas_hechas_++ == 0) {
