@@ -508,7 +508,7 @@ class RenderDk final : public DestinosNativos {
   std::vector<LecturaAplazada> lecturas_aplazadas_;
   uint64_t export_serie_ = 0;  // goes up each time records are written
   uint64_t export_dibujos_ = 0, export_registros_ = 0, export_escritos_ = 0, export_fuera_ = 0, export_llenos_ = 0;
-  uint64_t export_esperas_ = 0;
+  uint64_t export_esperas_ = 0, envios_parciales_ = 0;
   uint64_t informe_export_dibujos_ = 0, informe_export_escritos_ = 0, informe_export_fuera_ = 0;
   void RecogerCompilaciones();
 

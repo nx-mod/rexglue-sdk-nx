@@ -3271,6 +3271,12 @@ void RenderDk::SincronizarExportaciones(uint32_t inicio, uint32_t fin) {
     if (elegida < 0) {
       return;
     }
+    // What this work has recorded so far goes to the GPU first: waiting with it unsent left the GPU idle until the
+    // frame was closed (about 30 ms a frame, one wait a frame in Halo 3's game).
+    if (!nucleo_.TrabajoTerminado(export_ranuras_[elegida].trabajo) && nucleo_.TrabajoAbierto()) {
+      nucleo_.EnviarParcial();
+      ++envios_parciales_;
+    }
     nucleo_.EsperarTrabajo(export_ranuras_[elegida].trabajo, trabajo_);
     AplicarExportaciones(uint32_t(elegida));
     ++export_esperas_;
@@ -3459,6 +3465,7 @@ void RenderDk::InformePeriodico() {
                double(export_escritos_ - informe_export_escritos_) / fotogramas,
                double(export_fuera_ - informe_export_fuera_) / fotogramas, export_registros_, export_llenos_,
                export_esperas_);
+  X360_INFORME("[deko3d] envios parciales antes de esperar exportaciones: {} en total", envios_parciales_);
   const auto us = [&](uint32_t e) { return dibujos ? double(ns_etapas_[e] - informe_etapas_[e]) / double(dibujos) / 1e3 : 0.0; };
   static constexpr const char* kFasesSm[3] = {"mirando", "APLICANDO", "apagada"};
   X360_INFORME(
