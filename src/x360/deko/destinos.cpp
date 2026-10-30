@@ -3324,7 +3324,24 @@ void RenderDk::AplicarExportaciones(uint32_t ranura) {
   geometria_.Olvidar();  // guest memory changed under the ranges it trusts this epoch
   if (escrito) {
     ++export_serie_;
-    ++generacion_texturas_;  // the draws' per-fetch texture cache asks again (PrepararTextura rechecks over them)
+    // The draws' per-fetch texture cache asks again only when an exported range lies under a texture (PrepararTextura
+    // rechecks those): bumped every frame, each draw looked its textures up again (1 -> 5.8 us a draw in Halo 3).
+    bool bajo_textura = false;
+    for (auto it = texturas_.begin(); it != texturas_.end() && !bajo_textura; ++it) {
+      const TexturaDk& t = it->second;
+      if (!t.rango_fin) {
+        continue;
+      }
+      for (auto e = exportados_.rbegin(); e != exportados_.rend() && e->serie == export_serie_; ++e) {
+        if (e->inicio < t.rango_fin && t.rango_inicio < e->fin) {
+          bajo_textura = true;
+          break;
+        }
+      }
+    }
+    if (bajo_textura) {
+      ++generacion_texturas_;
+    }
   }
 }
 
