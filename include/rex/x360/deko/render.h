@@ -501,6 +501,7 @@ class RenderDk final : public DestinosNativos {
   uint64_t ms_desempaquetados_por_[8]{}, ms_empaquetados_por_[8]{};
   uint64_t informe_ms_desempaquetados_por_[8]{}, informe_ms_empaquetados_por_[8]{};
   uint64_t borrados_rapidos_ajenos_ = 0, informe_borrados_rapidos_ajenos_ = 0;
+  uint64_t borrados_rapidos_aplazados_ = 0, informe_borrados_rapidos_aplazados_ = 0;
   uint64_t informe_contenidos_llevados_ = 0, informe_baldosas_traidas_ = 0;
   DkShader fs_copia_color_ms_{};  // kFsCopiaColor from a 4x companion
   bool fs_copia_color_ms_valido_ = false;
@@ -835,6 +836,8 @@ class RenderDk final : public DestinosNativos {
   // the draw.
   std::array<uint64_t, 6> ns_etapas_{};  // preparing, textures, state, vertices, indices, constants and the draw
   std::array<uint64_t, 6> informe_etapas_{};
+  // Diagnostic: the state stage's parts (targets, storage buffers, framing, shared constants, shaders, fixed state).
+  std::array<uint64_t, 6> ns_sub_estado_{}, informe_sub_estado_{};
   uint64_t informe_dedupe_bytes_ = 0;
   uint64_t informe_copias_3d_ = 0, informe_barreras_fragmentos_ = 0, informe_frontales_ = 0, informe_bandas_ = 0;
   // Framing cache (generacion_encuadre and the pass)

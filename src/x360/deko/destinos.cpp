@@ -1010,6 +1010,16 @@ bool RenderDk::BorradoRapidoD3D(const uint32_t* r, uint32_t cuenta) {
         cubre_y = std::max(cubre_y, uint32_t(std::max(0.0f, std::floor(std::max({ys[0], ys[1], ys[2]}) + 0.5f))) * por_y);
       }
     }
+    // A clear of the whole image: pending, as a resolve's clear (HacerBorradoPendiente), done when the image is next
+    // bound (on its 4x companion if the pass is 4x) and only over the rows in use, the rest as draws or reads reach
+    // them (CompletarBanda). Halo 3's menu clears its whole 4x surface for each 160-row tile.
+    if (cubre_x + 80 >= imagen.ancho && cubre_y >= imagen.alto) {
+      std::memcpy(imagen.borrado_color, color, sizeof(color));
+      imagen.borrado_pendiente = true;
+      g_.pase_valido = false;  // the next draw binds its targets again, which does the clear
+      ++borrados_rapidos_aplazados_;
+      continue;
+    }
     HacerBorradoPendiente(imagen);
     // A 4x surface whose companion holds the newer copy (a 4x pass drew it): cleared there, its rows still the
     // companion's. Unpacking it first, then the next 4x pass packing it back, cost 8 ms a frame in Halo 3's menu,
@@ -3520,6 +3530,7 @@ void RenderDk::InformePeriodico() {
     informe_export_escritos_ = export_escritos_;
     informe_export_fuera_ = export_fuera_;
     informe_etapas_ = ns_etapas_;
+    informe_sub_estado_ = ns_sub_estado_;
     informe_dedupe_bytes_ = dedupe_.bytes_ahorrados();
     informe_intercambios_ = intercambios_;
     informe_restauraciones_ = restauraciones_;
@@ -3604,12 +3615,14 @@ void RenderDk::InformePeriodico() {
       informe_ms_empaquetados_por_[i] = ms_empaquetados_por_[i];
     }
     X360_INFORME("[deko3d] 4x por fotograma (desempaquetados/empaquetados) por causa{}; borrados rapidos de otra "
-                 "familia saltados {:.1f}; contenidos llevados {:.1f}, baldosas traidas {:.1f}",
+                 "familia saltados {:.1f}, aplazados {:.1f}; contenidos llevados {:.1f}, baldosas traidas {:.1f}",
                  por.empty() ? std::string(": ninguno") : por,
                  double(borrados_rapidos_ajenos_ - informe_borrados_rapidos_ajenos_) / fotogramas,
+                 double(borrados_rapidos_aplazados_ - informe_borrados_rapidos_aplazados_) / fotogramas,
                  double(contenidos_llevados_ - informe_contenidos_llevados_) / fotogramas,
                  double(baldosas_traidas_ - informe_baldosas_traidas_) / fotogramas);
     informe_borrados_rapidos_ajenos_ = borrados_rapidos_ajenos_;
+    informe_borrados_rapidos_aplazados_ = borrados_rapidos_aplazados_;
     informe_contenidos_llevados_ = contenidos_llevados_;
     informe_baldosas_traidas_ = baldosas_traidas_;
   }
@@ -3634,6 +3647,14 @@ void RenderDk::InformePeriodico() {
       cielo_guardia_ == kCieloAplazando ? "superada" : cielo_guardia_ == kCieloDescartado ? "descartada" : "mirando",
       double(dedupe_.bytes_ahorrados() - informe_dedupe_bytes_) / 1048576.0 / fotogramas, kFasesSm[sm_fase_ % 3],
       sm_ciclos_, sm_limpios_seguidos_, sm_ciclos_aplicados_, sm_diferencias_, us(0), us(1), us(2), us(3), us(4), us(5));
+  {
+    const auto sub = [&](uint32_t e) {
+      return dibujos ? double(ns_sub_estado_[e] - informe_sub_estado_[e]) / double(dibujos) / 1e3 : 0.0;
+    };
+    X360_INFORME("[deko3d] estado por dibujo: destinos {:.2f} us, buferes {:.2f}, encuadre y bandas {:.2f}, "
+                 "constantes compartidas {:.2f}, shaders {:.2f}, estado fijo {:.2f}",
+                 sub(0), sub(1), sub(2), sub(3), sub(4), sub(5));
+  }
   X360_INFORME(
       "[deko3d] por fotograma: {:.1f} copias en el motor 3D, {:.1f} barreras de fragmentos, {:.2f} frontales pintados "
       "desde su destino sin copiar ({} copiados en total, {}), {:.2f} bandas borradas; constantes por diferencias: "

@@ -1770,6 +1770,13 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   }
 
   cortar_etapa(1);
+  // Diagnostic: the state stage split in six (ns_sub_estado_), waits for the GPU included.
+  uint64_t marca_sub = deko::AhoraNs();
+  auto cortar_sub = [&](uint32_t i) {
+    const uint64_t ahora = deko::AhoraNs();
+    ns_sub_estado_[i] += ahora - marca_sub;
+    marca_sub = ahora;
+  };
   // --- Upload space for everything this draw needs from here on, all in one slot
   const uint32_t bytes_indices =
       con_indices && !indices_almacen.gpu ? (indices_de_16 ? n_indices * 2 : n_indices * 4) : 0;
@@ -1844,6 +1851,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
   }
   DkCmdBuf cmd = nucleo_.comandos();
+  cortar_sub(0);
 
   // --- Halo 3's storage buffers and its booleans and loop constants (their space is in `necesarios`)
   for (uint32_t i = 0; i < n_buferes_vf; ++i) {
@@ -1886,6 +1894,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
     dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 3, s.gpu, DK_UNIFORM_BUF_ALIGNMENT);
   }
+  cortar_sub(1);
 
   // --- Framing (cached while generacion_encuadre and the pass do not change)
   const uint32_t vte = r[gr::XE_GPU_REG_PA_CL_VTE_CNTL];
@@ -1990,6 +1999,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     }
   }
 
+  cortar_sub(2);
   // --- Specialization and shared constants
   uint32_t especializacion = entrada->especializacion;
   static const bool inv_tamano = REXCVAR_GET(nfsmw_nativo_inv_tamano_tex);
@@ -2118,6 +2128,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     EmitirCieloPendiente();  // before this draw binds anything
   }
   AntesDe3D();  // a transfer recorded since the pass began (a cubemap's faces) is finished first
+  cortar_sub(3);
 
   // --- Shaders
   const DkShader* vs = ShaderDe(*p.vs, especializacion, ps ? InfoDe(*ps).interpoladores : 0u);
@@ -2135,6 +2146,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
     g_.ps = fs;
     g_.gs = gs;
   }
+  cortar_sub(4);
 
   // --- Fixed state, each block only when it changes
   {
@@ -2320,6 +2332,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
   g_.valido = true;
 
   // --- Uploads: vertices, indices and constants (the space was checked above: this slot)
+  cortar_sub(5);
   cortar_etapa(2);
   std::array<DkBufExtents, 16> bufers{};
   for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
